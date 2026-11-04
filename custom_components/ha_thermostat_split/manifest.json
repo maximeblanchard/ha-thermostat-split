@@ -1,0 +1,14 @@
+{
+  "domain": "ha_thermostat_split",
+  "name": "HA Thermostat Split",
+  "version": "0.2.0",
+  "config_flow": true,
+  "documentation": "https://github.com/",
+  "issue_tracker": "https://github.com/",
+  "codeowners": [],
+  "requirements": [],
+  "dependencies": [],
+  "after_dependencies": ["climate", "sensor"],
+  "iot_class": "calculated",
+  "integration_type": "helper"
+}
