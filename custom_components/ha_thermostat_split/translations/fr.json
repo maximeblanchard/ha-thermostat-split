@@ -3,72 +3,57 @@
     "step": {
       "user": {
         "title": "Ajouter une pièce",
+        "description": "Indiquez simplement le split et les capteurs pour commencer.",
         "data": {
           "name": "Nom de la pièce",
-          "split_entity": "Split à piloter (entité climate)",
-          "temperature_sensors": "Capteurs de température de la pièce (moyenne)",
-          "power_sensor": "Puissance électrique totale de la PAC",
-          "target_default": "Température cible par défaut",
-          "min_temp": "Température cible minimale",
-          "max_temp": "Température cible maximale",
-          "anti_spam_seconds": "Délai anti-spam entre commandes au split (secondes)",
-          "inverter_mode": "Modulation inverter continue (consigne dynamique)",
-          "inverter_min_offset": "Offset inverter minimal au-dessus du split (maintien à bas régime)",
-          "inverter_max_offset": "Offset inverter maximal au-dessus du split (chauffe rapide)",
-          "inverter_p_band": "Bande proportionnelle de modulation inverter",
-          "learning_enabled": "Apprentissage auto anti-yoyo (inertie et biais)",
-          "split_setpoint": "Consigne fixe de repli envoyée au split",
-          "min_on_minutes": "Cycle minimal : durée de marche cible",
-          "min_off_minutes": "Pause minimale cible",
-          "cold_tolerance": "Tolérance basse (démarrage sous la cible)",
-          "hot_tolerance": "Tolérance haute (arrêt au-dessus de la cible)",
-          "max_overshoot": "Dépassement maximal autorisé pour tenir le cycle minimal",
-          "max_undershoot": "Sous-chauffe maximale pendant la pause minimale",
-          "compressor_on_threshold": "Seuil de puissance du compresseur en marche",
-          "sensor_max_age_minutes": "Âge maximal d'un capteur",
-          "failsafe_minutes": "Arrêt de sécurité sans capteur valide",
-          "resync_minutes": "Réaffirmation de la consigne au split"
+          "split_entity": "Split physique (entité climate)",
+          "temperature_sensors": "Capteurs de température de la pièce (moyenne automatique)",
+          "power_sensor": "Capteur de puissance de la PAC"
+        },
+        "data_description": {
+          "temperature_sensors": "Ajoutez vos capteurs de température un par un. L'intégration calcule automatiquement la moyenne en temps réel."
         }
       }
     },
     "error": {
-      "no_sensor": "Sélectionne au moins un capteur de température.",
-      "bad_range": "La température minimale doit être inférieure à la maximale."
+      "no_sensor": "Sélectionnez au moins un capteur de température."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Paramètres de la pièce",
+        "title": "Paramètres et réglages avancés",
         "data": {
-          "split_entity": "Split à piloter (entité climate)",
-          "temperature_sensors": "Capteurs de température de la pièce (moyenne)",
-          "power_sensor": "Puissance électrique totale de la PAC",
-          "target_default": "Température cible par défaut",
-          "min_temp": "Température cible minimale",
-          "max_temp": "Température cible maximale",
-          "anti_spam_seconds": "Délai anti-spam entre commandes au split (secondes)",
-          "inverter_mode": "Modulation inverter continue (consigne dynamique)",
-          "inverter_min_offset": "Offset inverter minimal au-dessus du split (maintien à bas régime)",
-          "inverter_max_offset": "Offset inverter maximal au-dessus du split (chauffe rapide)",
-          "inverter_p_band": "Bande proportionnelle de modulation inverter",
-          "learning_enabled": "Apprentissage auto anti-yoyo (inertie et biais)",
+          "split_entity": "Split physique (entité climate)",
+          "temperature_sensors": "Capteurs de température de la pièce (moyenne automatique)",
+          "power_sensor": "Capteur de puissance de la PAC",
+          "compressor_on_threshold": "Seuil compresseur en marche",
+          "min_temp": "Température minimale réglable",
+          "max_temp": "Température maximale réglable",
+          "anti_spam_seconds": "Délai anti-spam entre commandes (secondes)",
+          "inverter_mode": "Modulation inverter continue",
+          "inverter_min_offset": "Offset inverter minimal (maintien bas régime)",
+          "inverter_max_offset": "Offset inverter maximal (chauffe rapide)",
+          "inverter_p_band": "Bande proportionnelle inverter",
+          "learning_enabled": "Apprentissage auto anti-yoyo",
           "split_setpoint": "Consigne fixe de repli envoyée au split",
-          "min_on_minutes": "Cycle minimal : durée de marche cible",
-          "min_off_minutes": "Pause minimale cible",
+          "min_on_minutes": "Cycle minimal de marche",
+          "min_off_minutes": "Pause minimale",
           "cold_tolerance": "Tolérance basse (démarrage sous la cible)",
           "hot_tolerance": "Tolérance haute (arrêt au-dessus de la cible)",
-          "max_overshoot": "Dépassement maximal autorisé pour tenir le cycle minimal",
-          "max_undershoot": "Sous-chauffe maximale pendant la pause minimale",
-          "compressor_on_threshold": "Seuil de puissance du compresseur en marche",
+          "max_overshoot": "Dépassement maximal pour cycle minimal",
+          "max_undershoot": "Sous-chauffe maximale pendant la pause",
           "sensor_max_age_minutes": "Âge maximal d'un capteur",
-          "failsafe_minutes": "Arrêt de sécurité sans capteur valide",
-          "resync_minutes": "Réaffirmation de la consigne au split"
+          "failsafe_minutes": "Arrêt de sécurité sans capteur",
+          "resync_minutes": "Réaffirmation de la consigne"
+        },
+        "data_description": {
+          "temperature_sensors": "Ajoutez ou retirez des capteurs de température un par un."
         }
       }
     },
     "error": {
-      "no_sensor": "Sélectionne au moins un capteur de température.",
+      "no_sensor": "Sélectionnez au moins un capteur de température.",
       "bad_range": "La température minimale doit être inférieure à la maximale."
     }
   }

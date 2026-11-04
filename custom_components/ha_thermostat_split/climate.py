@@ -104,7 +104,11 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         self._entry = entry
         cfg = {**DEFAULTS, **entry.data, **entry.options}
         self._split: str = cfg[CONF_SPLIT]
-        self._sensors: list[str] = list(cfg[CONF_SENSORS])
+        raw_sensors = cfg.get(CONF_SENSORS, [])
+        if isinstance(raw_sensors, str):
+            self._sensors = [raw_sensors]
+        else:
+            self._sensors = [str(s) for s in raw_sensors]
         self._power: str = cfg[CONF_POWER]
         self._threshold = float(cfg[CONF_POWER_THRESHOLD])
         self._params = Params(

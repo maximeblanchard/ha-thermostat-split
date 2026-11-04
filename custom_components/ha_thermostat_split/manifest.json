@@ -10,5 +10,5 @@
   "dependencies": [],
   "after_dependencies": ["climate", "sensor"],
   "iot_class": "calculated",
-  "integration_type": "helper"
+  "integration_type": "device"
 }

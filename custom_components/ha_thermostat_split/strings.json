@@ -3,67 +3,52 @@
     "step": {
       "user": {
         "title": "Add a room",
+        "description": "Specify the split and the sensors to get started.",
         "data": {
           "name": "Room name",
-          "split_entity": "Split to control (climate entity)",
-          "temperature_sensors": "Room temperature sensors (averaged)",
-          "power_sensor": "Total heat pump electrical power",
-          "target_default": "Default target temperature",
-          "min_temp": "Minimum target temperature",
-          "max_temp": "Maximum target temperature",
-          "anti_spam_seconds": "Anti-spam delay between split commands (seconds)",
-          "inverter_mode": "Continuous inverter modulation (dynamic setpoint)",
-          "inverter_min_offset": "Minimum inverter offset above split sensor (modulation hold)",
-          "inverter_max_offset": "Maximum inverter offset above split sensor (fast heat)",
-          "inverter_p_band": "Proportional band for inverter modulation",
-          "learning_enabled": "Anti-yoyo learning (thermal inertia and sensor bias)",
-          "split_setpoint": "Fallback setpoint sent to the split",
-          "min_on_minutes": "Minimum cycle: target run time",
-          "min_off_minutes": "Target minimum pause",
-          "cold_tolerance": "Cold tolerance (start below target)",
-          "hot_tolerance": "Hot tolerance (stop above target)",
-          "max_overshoot": "Maximum overshoot allowed to keep the minimum cycle",
-          "max_undershoot": "Maximum undershoot during the minimum pause",
-          "compressor_on_threshold": "Power threshold for compressor running",
-          "sensor_max_age_minutes": "Maximum sensor age",
-          "failsafe_minutes": "Failsafe stop without valid sensor",
-          "resync_minutes": "Setpoint re-assertion interval"
+          "split_entity": "Physical split (climate entity)",
+          "temperature_sensors": "Room temperature sensors (automatic average)",
+          "power_sensor": "Heat pump power sensor"
+        },
+        "data_description": {
+          "temperature_sensors": "Add your room temperature sensors one by one. The integration automatically computes the real-time average."
         }
       }
     },
     "error": {
-      "no_sensor": "Select at least one temperature sensor.",
-      "bad_range": "Minimum temperature must be lower than maximum."
+      "no_sensor": "Select at least one temperature sensor."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Room settings",
+        "title": "Room settings and advanced tuning",
         "data": {
-          "split_entity": "Split to control (climate entity)",
-          "temperature_sensors": "Room temperature sensors (averaged)",
-          "power_sensor": "Total heat pump electrical power",
-          "target_default": "Default target temperature",
+          "split_entity": "Physical split (climate entity)",
+          "temperature_sensors": "Room temperature sensors (automatic average)",
+          "power_sensor": "Heat pump power sensor",
+          "compressor_on_threshold": "Compressor on threshold",
           "min_temp": "Minimum target temperature",
           "max_temp": "Maximum target temperature",
-          "anti_spam_seconds": "Anti-spam delay between split commands (seconds)",
-          "inverter_mode": "Continuous inverter modulation (dynamic setpoint)",
-          "inverter_min_offset": "Minimum inverter offset above split sensor (modulation hold)",
-          "inverter_max_offset": "Maximum inverter offset above split sensor (fast heat)",
-          "inverter_p_band": "Proportional band for inverter modulation",
-          "learning_enabled": "Anti-yoyo learning (thermal inertia and sensor bias)",
-          "split_setpoint": "Fallback setpoint sent to the split",
-          "min_on_minutes": "Minimum cycle: target run time",
-          "min_off_minutes": "Target minimum pause",
+          "anti_spam_seconds": "Anti-spam delay between commands (seconds)",
+          "inverter_mode": "Continuous inverter modulation",
+          "inverter_min_offset": "Minimum inverter offset (low power hold)",
+          "inverter_max_offset": "Maximum inverter offset (fast heat)",
+          "inverter_p_band": "Inverter proportional band",
+          "learning_enabled": "Anti-yoyo self-learning",
+          "split_setpoint": "Fallback setpoint sent to split",
+          "min_on_minutes": "Minimum run cycle",
+          "min_off_minutes": "Minimum pause",
           "cold_tolerance": "Cold tolerance (start below target)",
           "hot_tolerance": "Hot tolerance (stop above target)",
-          "max_overshoot": "Maximum overshoot allowed to keep the minimum cycle",
-          "max_undershoot": "Maximum undershoot during the minimum pause",
-          "compressor_on_threshold": "Power threshold for compressor running",
+          "max_overshoot": "Maximum overshoot for minimum cycle",
+          "max_undershoot": "Maximum undershoot during pause",
           "sensor_max_age_minutes": "Maximum sensor age",
-          "failsafe_minutes": "Failsafe stop without valid sensor",
+          "failsafe_minutes": "Failsafe stop without sensor",
           "resync_minutes": "Setpoint re-assertion interval"
+        },
+        "data_description": {
+          "temperature_sensors": "Add or remove room temperature sensors one by one."
         }
       }
     },
