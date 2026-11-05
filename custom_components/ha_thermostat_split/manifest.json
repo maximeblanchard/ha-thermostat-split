@@ -1,7 +1,7 @@
 {
   "domain": "ha_thermostat_split",
   "name": "HA Thermostat Split",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "config_flow": true,
   "documentation": "https://github.com/maximeblanchard/ha-thermostat-split",
   "issue_tracker": "https://github.com/maximeblanchard/ha-thermostat-split/issues",

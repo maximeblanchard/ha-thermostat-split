@@ -30,7 +30,8 @@
           "compressor_on_threshold": "Seuil compresseur en marche",
           "min_temp": "Température minimale réglable",
           "max_temp": "Température maximale réglable",
-          "anti_spam_seconds": "Délai anti-spam entre commandes (secondes)",
+          "anti_spam_seconds": "Délai anti-spam START/STOP (secondes)",
+          "modulation_interval_seconds": "Intervalle minimal de modulation inverter (secondes)",
           "inverter_mode": "Modulation inverter continue",
           "inverter_min_offset": "Offset inverter minimal (maintien bas régime)",
           "inverter_max_offset": "Offset inverter maximal (chauffe rapide)",
@@ -54,7 +55,8 @@
     },
     "error": {
       "no_sensor": "Sélectionnez au moins un capteur de température.",
-      "bad_range": "La température minimale doit être inférieure à la maximale."
+      "bad_range": "La température minimale doit être inférieure à la maximale.",
+      "bad_offset_range": "L'offset inverter minimal ne doit pas dépasser l'offset maximal."
     }
   }
 }

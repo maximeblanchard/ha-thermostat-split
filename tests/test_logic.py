@@ -109,7 +109,7 @@ class InverterModulation(unittest.TestCase):
     def setUp(self):
         self.params = InverterParams(
             enabled=True,
-            min_offset=0.5,
+            min_offset=1.5,
             max_offset=3.0,
             p_band=1.5,
             step=0.5,
@@ -152,19 +152,50 @@ class InverterModulation(unittest.TestCase):
         )
         self.assertGreaterEqual(sp, 20.0)
 
-    def test_minimum_modulation_when_at_target(self):
+    def test_minimum_modulation_prevents_integer_idle(self):
         # Temp pièce = 20.0, Cible = 20.0 (erreur 0.0)
-        # Split mesure 22.2 -> setpoint = 22.2 + 0.5 = 22.7 -> arrondi 22.5
+        # Split mesure 21.0 (sonde entière) -> setpoint = 21.0 + 1.5 = 22.5
+        # Même si la sonde passe à 22 °C, 22 < 22.5 : aucun passage en idle !
         sp, offset, desc = compute_inverter_setpoint(
             room_temp=20.0,
             target_temp=20.0,
-            split_temp=22.2,
+            split_temp=21.0,
             fallback_setpoint=24.0,
             params=self.params,
         )
         self.assertEqual(sp, 22.5)
-        self.assertEqual(offset, 0.5)
+        self.assertEqual(offset, 1.5)
         self.assertIn("modulation minimale", desc)
+
+    def test_startup_ignores_trapped_hood_heat(self):
+        # Scénario réel CSV (17h47) : pièce à 19.0 °C (cible 19.5 °C), mais capot split à 27.0 °C !
+        # Au démarrage (cycle_elapsed_s=0), on ne doit PAS envoyer 28.5 °C mais ~22.0 °C (19.0 + 1.5 + 1.5)
+        sp, offset, desc = compute_inverter_setpoint(
+            room_temp=19.0,
+            target_temp=19.5,
+            split_temp=27.0,
+            fallback_setpoint=24.0,
+            params=self.params,
+            learned_bias=1.5,
+            cycle_elapsed_s=0.0,
+        )
+        self.assertEqual(sp, 22.0)
+        self.assertEqual(offset, 1.5)
+        self.assertIn("démarrage doux", desc)
+
+    def test_startup_ignores_cold_coil_flush_at_minute_3(self):
+        # Scénario réel CSV (07h46) : à t=180s, la turbine chasse l'air froid (split_temp tombe à 19 °C)
+        # La consigne doit rester ancrée à 22.0 °C et ne surtout pas plonger à 20.0/20.5 °C !
+        sp, offset, _ = compute_inverter_setpoint(
+            room_temp=19.0,
+            target_temp=19.5,
+            split_temp=19.0,
+            fallback_setpoint=24.0,
+            params=self.params,
+            learned_bias=1.5,
+            cycle_elapsed_s=180.0,
+        )
+        self.assertEqual(sp, 22.0)
 
     def test_anticipation_shifts_modulation(self):
         # Temp pièce = 19.8, Cible = 20.0. Erreur = 0.2
@@ -178,7 +209,7 @@ class InverterModulation(unittest.TestCase):
             params=self.params,
             anticipation_offset=0.3,
         )
-        self.assertEqual(offset, 0.5)
+        self.assertEqual(offset, 1.5)
         self.assertIn("modulation minimale", desc)
 
 
@@ -192,6 +223,24 @@ class AntiYoyoLearning(unittest.TestCase):
         self.assertEqual(slope, 1.0)
         anticip = learner.get_anticipation_offset(slope)
         self.assertEqual(anticip, 0.25)
+
+    def test_split_temp_asymmetric_filter_ignores_flicker_and_defrost(self):
+        learner = AntiYoyoLearner(learned_bias=1.5)
+        learner.start_cycle(target=19.5, initial_temp=19.0)
+        # Après stabilisation à 21 °C (t=600s -> t=1200s)
+        learner.update_split_temp(21.0, 19.5, cycle_elapsed_s=600.0, now_s=600.0)
+        learner.update_split_temp(21.0, 19.5, cycle_elapsed_s=900.0, now_s=900.0)
+        # Clignotement entier 21 -> 20 pendant 4 secondes (scénario 08h14)
+        filt = learner.update_split_temp(20.0, 19.5, cycle_elapsed_s=904.0, now_s=904.0)
+        self.assertGreaterEqual(filt, 20.8)
+        # Dégivrage de 3 minutes : split_temp tombe à 19 °C pendant 180s (scénario 05h17)
+        filt_defrost = learner.update_split_temp(19.0, 19.0, cycle_elapsed_s=1084.0, now_s=1084.0)
+        self.assertGreaterEqual(filt_defrost, 20.4)
+
+    def test_steady_bias_clamps_anomalies(self):
+        learner = AntiYoyoLearner(learned_bias=1.5)
+        learner.update_steady_bias(split_temp=28.0, room_temp=19.5)
+        self.assertLessEqual(learner.learned_bias, 3.0)
 
     def test_cycle_adaptation_overshoot(self):
         learner = AntiYoyoLearner(anticipation_h=0.25)

@@ -49,6 +49,7 @@ from .const import (
     CONF_MIN_OFF,
     CONF_MIN_ON,
     CONF_MIN_TEMP,
+    CONF_MODULATION_INTERVAL,
     CONF_POWER,
     CONF_POWER_THRESHOLD,
     CONF_RESYNC,
@@ -121,13 +122,16 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         )
         self._inverter_params = InverterParams(
             enabled=bool(cfg.get(CONF_INVERTER_MODE, True)),
-            min_offset=float(cfg.get(CONF_INVERTER_MIN_OFFSET, 0.5)),
+            min_offset=float(cfg.get(CONF_INVERTER_MIN_OFFSET, 1.5)),
             max_offset=float(cfg.get(CONF_INVERTER_MAX_OFFSET, 3.0)),
             p_band=float(cfg.get(CONF_INVERTER_P_BAND, 1.5)),
             step=0.5,
         )
         self._learning_enabled = bool(cfg.get(CONF_LEARNING_ENABLED, True))
         self._anti_spam = timedelta(seconds=float(cfg.get(CONF_ANTI_SPAM, 90.0)))
+        self._modulation_interval = timedelta(
+            seconds=float(cfg.get(CONF_MODULATION_INTERVAL, 300.0))
+        )
         self._split_setpoint = float(cfg[CONF_SPLIT_SETPOINT])
         self._sensor_max_age = float(cfg[CONF_SENSOR_MAX_AGE])
         self._failsafe_s = float(cfg[CONF_FAILSAFE]) * 60
@@ -150,6 +154,8 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         self._invalid_since: datetime | None = None
         self._last_command: datetime | None = None
         self._last_setpoint_sent: float | None = None
+        self._cycle_started_at: datetime | None = None
+        self._user_target_changed = False
         self._tracker: CompressorTracker | None = None
         self._lock = asyncio.Lock()
         self._control_task: asyncio.Task[None] | None = None
@@ -197,6 +203,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             "capteurs_utilises": self._used,
             "capteurs_ignores": self._ignored,
             "temperature_split": split_temp,
+            "temperature_split_filtree": self._learner.filtered_split_temp,
             "biais_capteur_split": bias,
             "consigne_envoyee_au_split": self._last_setpoint_sent,
             "mode_inverter_actif": self._inverter_params.enabled,
@@ -209,6 +216,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             "dernier_overshoot_deg": self._learner.last_overshoot,
             "cycles_appris": self._learner.cycle_count,
             "anti_spam_secondes": self._anti_spam.total_seconds(),
+            "intervalle_modulation_secondes": self._modulation_interval.total_seconds(),
             "compresseur_actif": tr.is_on if tr else None,
             "compresseur_depuis_min": round(age / 60, 1) if age is not None else None,
             "cycles_aujourdhui": tr.cycles_today() if tr else None,
@@ -247,9 +255,12 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         self.async_on_remove(self._tracker.register_listener(self._schedule_control))
 
         # reprise de l'état réel du split
+        now = dt_util.utcnow()
+        self._temp = self._compute_temperature(now)
         split = self.hass.states.get(self._split)
         if split is not None and split.state == HVACMode.HEAT:
             self._demand = True
+            self._cycle_started_at = now - timedelta(minutes=10)
             self._tracker.set_active(self._entry.entry_id, True)
             if self._learning_enabled and self._temp is not None:
                 self._learner.start_cycle(self._target, self._temp)
@@ -291,7 +302,10 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         temp = kwargs.get(ATTR_TEMPERATURE)
         if temp is None:
             return
-        self._target = max(self._attr_min_temp, min(self._attr_max_temp, float(temp)))
+        new_target = max(self._attr_min_temp, min(self._attr_max_temp, float(temp)))
+        if abs(new_target - self._target) >= 0.05:
+            self._user_target_changed = True
+        self._target = new_target
         self.async_write_ha_state()
         await self._async_control()
 
@@ -351,17 +365,32 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
     async def _async_control(self) -> None:
         async with self._lock:
             now = dt_util.utcnow()
+            now_ts = now.timestamp()
             self._temp = self._compute_temperature(now)
             self._adopt_split_state(now)
 
             if self._temp is not None:
-                self._learner.add_sample(now.timestamp(), self._temp, self._params.hot_tolerance)
+                self._learner.add_sample(now_ts, self._temp, self._params.hot_tolerance)
                 self._slope = self._learner.compute_slope()
                 self._anticip_offset = (
                     self._learner.get_anticipation_offset(self._slope)
                     if self._learning_enabled
                     else 0.0
                 )
+                if self._demand:
+                    cycle_elapsed_s = (
+                        max(0.0, (now - self._cycle_started_at).total_seconds())
+                        if self._cycle_started_at is not None
+                        else None
+                    )
+                    self._learner.update_split_temp(
+                        self._get_split_current_temp(),
+                        self._temp,
+                        cycle_elapsed_s=cycle_elapsed_s,
+                        startup_grace_s=self._inverter_params.startup_grace_s,
+                        max_plausible_bias=self._inverter_params.max_plausible_bias,
+                        now_s=now_ts,
+                    )
 
             if self._hvac_mode == HVACMode.OFF:
                 self._reason = "régulation arrêtée"
@@ -385,10 +414,13 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
                 others_active=tracker.others_active(self._entry.entry_id),
             )
 
-            # Application du délai anti-spam
+            # Application du délai anti-spam sur START/STOP
             if decision.action != HOLD and self._last_command is not None:
                 if now - self._last_command < self._anti_spam:
-                    decision = Decision(HOLD, f"temporisation anti-spam (encore {round((self._anti_spam - (now - self._last_command)).total_seconds())} s)")
+                    decision = Decision(
+                        HOLD,
+                        f"temporisation anti-spam (encore {round((self._anti_spam - (now - self._last_command)).total_seconds())} s)",
+                    )
 
             self._reason = decision.reason
             if decision.action == START:
@@ -421,6 +453,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         if is_heat != self._demand:
             _LOGGER.debug("%s : split passé en %s hors régulation, alignement", self.entity_id, split.state)
             self._demand = is_heat
+            self._cycle_started_at = now if is_heat else None
             # Si le split physique a été éteint manuellement, aligner le thermostat virtuel sur OFF
             # pour éviter qu'il ne se rallume tout seul au prochain cycle
             if not is_heat and self._hvac_mode == HVACMode.HEAT:
@@ -440,7 +473,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             _LOGGER.error("%s : échec de climate.%s sur %s : %s", self.entity_id, service, self._split, err)
             return False
 
-    def _split_setpoint_to_send(self) -> float:
+    def _split_setpoint_to_send(self, cycle_elapsed_s: float | None = None) -> float:
         split_temp = self._get_split_current_temp()
         split = self.hass.states.get(self._split)
         max_temp = 30.0
@@ -457,12 +490,20 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         if self._temp is None:
             return min(max_temp, max(min_temp, self._split_setpoint))
 
+        if cycle_elapsed_s is None and self._cycle_started_at is not None:
+            cycle_elapsed_s = max(
+                0.0, (dt_util.utcnow() - self._cycle_started_at).total_seconds()
+            )
+
         inverter_params = InverterParams(
             enabled=self._inverter_params.enabled,
             min_offset=self._inverter_params.min_offset,
             max_offset=self._inverter_params.max_offset,
             p_band=self._inverter_params.p_band,
             step=step,
+            startup_grace_s=self._inverter_params.startup_grace_s,
+            soft_start_error=self._inverter_params.soft_start_error,
+            max_plausible_bias=self._inverter_params.max_plausible_bias,
         )
 
         setpoint, offset, mode_desc = compute_inverter_setpoint(
@@ -472,15 +513,21 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             fallback_setpoint=self._split_setpoint,
             params=inverter_params,
             anticipation_offset=self._anticip_offset,
+            learned_bias=self._learner.learned_bias,
+            filtered_split_temp=self._learner.filtered_split_temp,
+            cycle_elapsed_s=cycle_elapsed_s,
             min_temp=min_temp,
             max_temp=max_temp,
         )
         self._current_offset = offset
         self._inverter_mode_desc = mode_desc
 
+        # N'apprendre le biais capteur qu'après au moins 10 min de régime établi (capot ventilé)
         if (
             self._learning_enabled
             and split_temp is not None
+            and cycle_elapsed_s is not None
+            and cycle_elapsed_s >= 600.0
             and abs(self._target - self._temp) <= 0.3
             and self._tracker
             and self._tracker.is_on
@@ -489,9 +536,9 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
 
         return setpoint
 
-    async def _send_heat(self) -> bool:
+    async def _send_heat(self, cycle_elapsed_s: float | None = None) -> bool:
         split = self.hass.states.get(self._split)
-        setpoint = self._split_setpoint_to_send()
+        setpoint = self._split_setpoint_to_send(cycle_elapsed_s=cycle_elapsed_s)
 
         # Si le split n'est pas encore en mode chauffe, on utilise un SEUL appel combiné
         # (consigne + hvac_mode: heat) supporté par Home Assistant pour éviter tout double envoi
@@ -520,13 +567,23 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         return False
 
     async def _start(self, now: datetime) -> None:
-        if await self._send_heat():
+        prev_start = self._cycle_started_at
+        self._cycle_started_at = now
+        if await self._send_heat(cycle_elapsed_s=0.0):
             self._demand = True
             self._last_command = now
+            self._user_target_changed = False
             self._tracker.set_active(self._entry.entry_id, True)
-            if self._learning_enabled and self._temp is not None:
-                self._learner.start_cycle(self._target, self._temp)
+            if self._temp is not None:
+                if self._learning_enabled:
+                    self._learner.start_cycle(self._target, self._temp)
+                else:
+                    self._learner.filtered_split_temp = round(
+                        self._temp + max(0.5, min(3.0, self._learner.learned_bias)), 2
+                    )
             _LOGGER.debug("%s : démarrage (%s)", self.entity_id, self._reason)
+        else:
+            self._cycle_started_at = prev_start
 
     async def _stop(self, now: datetime, forced: bool = False) -> None:
         split = self.hass.states.get(self._split)
@@ -537,16 +594,20 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             ok = await self._call("turn_off", {})
         if ok:
             self._demand = False
+            self._cycle_started_at = None
+            self._user_target_changed = False
             self._last_command = now
             self._tracker.set_active(self._entry.entry_id, False)
             if self._learning_enabled:
                 self._learner.stop_heating(now.timestamp())
                 if self._store is not None:
                     self.hass.async_create_task(self._store.async_save(self._learner.to_dict()))
+            else:
+                self._learner.filtered_split_temp = None
             _LOGGER.debug("%s : arrêt (%s)", self.entity_id, self._reason)
 
     async def _reassert(self, now: datetime) -> None:
-        """Ajuste ou réaffirme la consigne modulante vers le split en respectant l'anti-spam."""
+        """Ajuste la consigne modulante vers le split sans spammer ni provoquer de mise en veille."""
         if not self._demand:
             return
         if self._last_command is not None and now - self._last_command < self._anti_spam:
@@ -560,16 +621,75 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         except (TypeError, ValueError):
             return
 
-        wanted = self._split_setpoint_to_send()
-        # On n'appelle le service QUE si la consigne demandée a réellement changé d'au moins 0.4°C
-        # Cela garantit aucun appel inutile quand le split est déjà à la bonne température
-        if abs(current - wanted) >= 0.4:
-            if await self._call("set_temperature", {ATTR_TEMPERATURE: wanted}):
-                self._last_setpoint_sent = wanted
-                self._last_command = now
-                _LOGGER.debug(
-                    "%s : consigne modulée ajustée à %.1f °C (%s)",
-                    self.entity_id,
-                    wanted,
-                    self._inverter_mode_desc,
+        cycle_elapsed_s = (
+            max(0.0, (now - self._cycle_started_at).total_seconds())
+            if self._cycle_started_at is not None
+            else None
+        )
+        wanted = self._split_setpoint_to_send(cycle_elapsed_s=cycle_elapsed_s)
+        raw_split_temp = self._get_split_current_temp()
+        hvac_action = split.attributes.get("hvac_action")
+
+        # Relance anti-idle : après brassage initial (>= 4 min), si le split s'est mis en veille
+        # ou n'a pas démarré car sa sonde interne a rattrapé la consigne envoyée
+        anti_idle_rescue = False
+        if (
+            cycle_elapsed_s is not None
+            and cycle_elapsed_s >= 240.0
+            and raw_split_temp is not None
+            and (
+                hvac_action == HVACAction.IDLE
+                or (self._tracker is not None and not self._tracker.is_on)
+            )
+            and current < raw_split_temp + 1.0
+        ):
+            try:
+                max_temp = float(split.attributes.get("max_temp", 30.0))
+                step = float(split.attributes.get("target_temperature_step", 0.5)) or 0.5
+            except (TypeError, ValueError):
+                max_temp, step = 30.0, 0.5
+            rescue_sp = round((raw_split_temp + self._inverter_params.min_offset) / step) * step
+            if self._tracker is not None and self._tracker.is_on and self._temp is not None:
+                cap = (
+                    self._temp
+                    + self._inverter_params.max_plausible_bias
+                    + self._inverter_params.max_offset
                 )
+                rescue_sp = min(rescue_sp, round(cap / step) * step)
+            else:
+                rescue_sp = min(rescue_sp, 28.0)
+            wanted = min(max_temp, max(wanted, round(rescue_sp, 1)))
+            anti_idle_rescue = True
+
+        urgent = self._user_target_changed or anti_idle_rescue
+        if not urgent:
+            # Verrouillage pendant les 5 premières minutes : évite de baisser la consigne
+            # quand la turbine brasse l'air avant que la batterie chaude ne soit à température
+            if (
+                cycle_elapsed_s is not None
+                and cycle_elapsed_s < self._inverter_params.startup_grace_s
+            ):
+                return
+            # Temporisation de modulation lente (5 min par défaut)
+            if (
+                self._last_command is not None
+                and now - self._last_command < self._modulation_interval
+            ):
+                return
+            # Zone morte de 1,0 °C pour éviter l'effet ping-pong de ±0,5 °C
+            if abs(current - wanted) < 1.0:
+                return
+        elif abs(current - wanted) < 0.4:
+            self._user_target_changed = False
+            return
+
+        if await self._call("set_temperature", {ATTR_TEMPERATURE: wanted}):
+            self._last_setpoint_sent = wanted
+            self._last_command = now
+            self._user_target_changed = False
+            _LOGGER.debug(
+                "%s : consigne modulée ajustée à %.1f °C (%s)",
+                self.entity_id,
+                wanted,
+                "relance anti-idle" if anti_idle_rescue else self._inverter_mode_desc,
+            )

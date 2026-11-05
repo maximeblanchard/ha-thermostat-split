@@ -13,9 +13,9 @@
 Thermostat **virtuel par pièce** qui pilote un split réel (entité `climate`) avec régulation continue Inverter, apprentissage anti-yoyo et protection compresseur :
 
 - **Moyenne des capteurs de température de la pièce** (corrige le biais de la sonde intégrée au split).
-- **Modulation continue Inverter** : ajuste dynamiquement la consigne envoyée au split pour faire moduler le compresseur à basse puissance plutôt que de faire de simples cycles Tout-ou-Rien.
-- **Apprentissage statistique anti-yoyo** : anticipe l'inertie thermique de la pièce en mesurant la vitesse de montée en température ($dT/dt$) et apprend le biais réel de la sonde du split au fil des cycles.
-- **Délai anti-spam paramétrable** : 90 secondes par défaut entre deux commandes pour protéger les liaisons (cloud ou infrarouge).
+- **Modulation continue Inverter stabilisée** : ajuste dynamiquement la consigne envoyée au split pour maintenir le compresseur à basse puissance (~450 W), avec filtrage asymétrique de la sonde interne (insensible aux sauts de 1 °C et aux dégivrages) et **démarrage doux anti-pic** (ignore l'air chaud piégé sous le capot à l'arrêt).
+- **Apprentissage statistique anti-yoyo** : anticipe l'inertie thermique de la pièce en mesurant la vitesse de montée en température ($dT/dt$) et apprend le biais réel de la sonde du split en régime établi.
+- **Anti-spam double niveau** : 90 secondes pour les démarrages/arrêts et 5 minutes (zone morte de 1,0 °C) entre deux modulations de consigne pour préserver l'électronique et les API cloud/IR.
 - **Garantie d'appel unique** : mode et consigne envoyés en un seul appel de service pour ne jamais saturer ou bloquer le split.
 - **Suivi de la puissance électrique totale de la PAC** : compresseur considéré en marche si puissance > seuil (45 W par défaut).
 - **Coordination multi-split intelligente** : partage le compresseur entre plusieurs pièces (démarrage libre si le compresseur tourne déjà, arrêt libre si une autre pièce chauffe).
@@ -62,13 +62,14 @@ logger:
 
 ## Principe de fonctionnement
 
-### 1. Régulation Inverter modulante
+### 1. Régulation Inverter modulante & anti-pic au démarrage
 Au lieu d'imposer un 24 °C fixe qui force la PAC à souffler à pleine puissance, l'intégration calcule dynamiquement :
-$$\text{Consigne envoyée au split} = T_{split} + \text{Offset}$$
+$$\text{Consigne envoyée au split} = T_{split,\text{filtrée}} + \text{Offset}$$
 
+- **Démarrage doux (5 premières minutes)** : ignore la chaleur stagnante sous le capot du split à l'arrêt (souvent 24–28 °C) en s'ancrant sur $T_{piece} + \text{biais appris}$ et démarre avec l'offset minimal pour éviter les pointes électriques à 2,5 kW+.
 - **Chauffe rapide** (pièce froide, écart important) : $\text{Offset} \approx +3.0 \text{ °C}$ $\rightarrow$ la PAC monte en puissance.
 - **Approche de la cible** : l'offset diminue proportionnellement.
-- **Maintien à la cible** : $\text{Offset} \approx +0.5 \text{ °C}$ $\rightarrow$ la PAC module à sa **puissance minimale technique** sans couper son compresseur.
+- **Maintien à la cible** : $\text{Offset} \approx +1.5 \text{ °C}$ $\rightarrow$ la PAC module à sa **puissance minimale technique** sans couper son compresseur, même lorsque la sonde interne du split évolue par pas de 1 °C entier.
 - **Arrêt complet** : uniquement si, malgré la modulation minimale, la pièce dépasse `cible + tolérance haute`.
 
 ### 2. Apprentissage anti-yoyo

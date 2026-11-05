@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import math
 from typing import Any
 
 START = "start"
@@ -18,7 +19,7 @@ class Params:
     hot_tolerance: float = 0.3
     min_on_s: float = 1800.0
     min_off_s: float = 300.0
-    max_overshoot: float = 1.0
+    max_overshoot: float = 1.2
     max_undershoot: float = 1.5
 
 
@@ -27,10 +28,13 @@ class InverterParams:
     """Paramètres de consigne dynamique inverter."""
 
     enabled: bool = True
-    min_offset: float = 0.5
+    min_offset: float = 1.5
     max_offset: float = 3.0
     p_band: float = 1.5
     step: float = 0.5
+    startup_grace_s: float = 300.0
+    soft_start_error: float = 1.0
+    max_plausible_bias: float = 3.5
 
 
 @dataclass(frozen=True)
@@ -100,6 +104,9 @@ def compute_inverter_setpoint(
     fallback_setpoint: float,
     params: InverterParams,
     anticipation_offset: float = 0.0,
+    learned_bias: float = 1.5,
+    filtered_split_temp: float | None = None,
+    cycle_elapsed_s: float | None = None,
     min_temp: float = 15.0,
     max_temp: float = 30.0,
 ) -> tuple[float, float, str]:
@@ -113,9 +120,35 @@ def compute_inverter_setpoint(
 
     error = target_temp - room_temp
     effective_error = error - anticipation_offset
+    in_startup = cycle_elapsed_s is not None and cycle_elapsed_s < params.startup_grace_s
 
+    # 1. Température de référence stabilisée du split
+    clamped_bias = max(0.5, min(3.0, learned_bias))
+    if in_startup:
+        # Au démarrage, l'air chaud piégé sous le capot (23–28 °C) puis le brassage initial
+        # faussent la sonde interne : on s'ancre sur la température pièce + biais appris
+        ref_split_temp = room_temp + clamped_bias
+    else:
+        raw_clamped = min(
+            room_temp + params.max_plausible_bias,
+            max(room_temp - 0.5, split_temp),
+        )
+        if filtered_split_temp is not None:
+            filt_clamped = min(
+                room_temp + params.max_plausible_bias,
+                max(room_temp - 0.5, filtered_split_temp),
+            )
+            # Ignore les micro-baisses (pas de 1 °C ou dégivrage) tout en couvrant une hausse réelle
+            ref_split_temp = max(filt_clamped, raw_clamped - 0.3)
+        else:
+            ref_split_temp = raw_clamped
+
+    # 2. Calcul de l'offset dynamique avec démarrage doux anti-pic (2,5 kW+)
     p_band = max(0.1, params.p_band)
-    if effective_error >= p_band:
+    if in_startup and error <= params.soft_start_error:
+        offset = params.min_offset
+        mode = "démarrage doux (anti-pic)"
+    elif effective_error >= p_band:
         offset = params.max_offset
         mode = "chauffe rapide (forte puissance)"
     elif effective_error <= 0.0:
@@ -126,7 +159,7 @@ def compute_inverter_setpoint(
         offset = params.min_offset + ratio * (params.max_offset - params.min_offset)
         mode = f"modulation inverter ({ratio * 100:.0f}%)"
 
-    raw_setpoint = split_temp + offset
+    raw_setpoint = ref_split_temp + offset
     step = params.step if params.step > 0 else 0.5
     rounded = round(raw_setpoint / step) * step
 
@@ -143,7 +176,7 @@ class AntiYoyoLearner:
     def __init__(
         self,
         anticipation_h: float = 0.25,
-        learned_bias: float = 2.0,
+        learned_bias: float = 1.5,
         min_anticipation_h: float = 0.05,
         max_anticipation_h: float = 0.8,
     ) -> None:
@@ -154,6 +187,8 @@ class AntiYoyoLearner:
         self.history_slope: deque[tuple[float, float]] = deque(maxlen=60)
         self.cycle_count = 0
         self.last_overshoot: float | None = None
+        self.filtered_split_temp: float | None = None
+        self._last_split_filter_s: float | None = None
         self._cycle_peak_temp: float | None = None
         self._cycle_target: float | None = None
         self._in_cycle = False
@@ -174,6 +209,46 @@ class AntiYoyoLearner:
                 # Si plus de 15 min écoulées ou si la température redescend nettement sous le pic
                 if elapsed >= 900.0 or temp <= (self._cycle_peak_temp - 0.15):
                     self._finalize_cycle(hot_tolerance)
+
+    def update_split_temp(
+        self,
+        split_temp: float | None,
+        room_temp: float | None,
+        cycle_elapsed_s: float | None = None,
+        startup_grace_s: float = 300.0,
+        max_plausible_bias: float = 3.5,
+        now_s: float | None = None,
+    ) -> float | None:
+        """Lisse la sonde interne du split (ignore l'air chaud piégé et les sauts de 1 °C)."""
+        if split_temp is None or room_temp is None:
+            return self.filtered_split_temp
+
+        clamped_bias = max(0.5, min(3.0, self.learned_bias))
+        if cycle_elapsed_s is not None and cycle_elapsed_s < startup_grace_s:
+            self.filtered_split_temp = round(room_temp + clamped_bias, 2)
+            self._last_split_filter_s = now_s
+            return self.filtered_split_temp
+
+        clamped = min(room_temp + max_plausible_bias, max(room_temp - 0.5, split_temp))
+        if self.filtered_split_temp is None:
+            self.filtered_split_temp = round(clamped, 2)
+            self._last_split_filter_s = now_s
+            return self.filtered_split_temp
+
+        # Filtrage asymétrique à constante de temps (insensible aux rafales d'événements HA) :
+        # tau = 120 s à la hausse, tau = 900 s (15 min) à la baisse (anti-clignotement 1 °C / dégivrage)
+        dt = (
+            60.0
+            if (now_s is None or self._last_split_filter_s is None)
+            else max(0.0, min(600.0, now_s - self._last_split_filter_s))
+        )
+        self._last_split_filter_s = now_s
+        tau = 120.0 if clamped >= self.filtered_split_temp else 900.0
+        alpha = 1.0 - math.exp(-dt / tau)
+        self.filtered_split_temp = round(
+            alpha * clamped + (1.0 - alpha) * self.filtered_split_temp, 2
+        )
+        return self.filtered_split_temp
 
     def compute_slope(self, window_s: float = 900.0) -> float:
         """Calcule la vitesse d'évolution thermique récente en °C/h."""
@@ -203,9 +278,10 @@ class AntiYoyoLearner:
         return round(self.anticipation_h * slope_deg_h, 3)
 
     def update_steady_bias(self, split_temp: float, room_temp: float) -> None:
-        """Met à jour le biais moyen split - pièce en régime de maintien."""
-        diff = split_temp - room_temp
-        self.learned_bias = round(0.05 * diff + 0.95 * self.learned_bias, 2)
+        """Met à jour le biais moyen split - pièce en régime de maintien stabilisé."""
+        diff = max(0.0, min(3.5, split_temp - room_temp))
+        updated = 0.05 * diff + 0.95 * self.learned_bias
+        self.learned_bias = round(max(0.5, min(3.0, updated)), 2)
 
     def start_cycle(self, target: float, initial_temp: float) -> None:
         """Démarre le suivi d'un cycle de chauffe."""
@@ -218,9 +294,15 @@ class AntiYoyoLearner:
         self._heating_stopped_at = None
         self._cycle_target = target
         self._cycle_peak_temp = initial_temp
+        self.filtered_split_temp = round(
+            initial_temp + max(0.5, min(3.0, self.learned_bias)), 2
+        )
+        self._last_split_filter_s = None
 
     def stop_heating(self, now_s: float) -> None:
         """Indique que la chauffe active s'est arrêtée, active l'observation du pic d'inertie."""
+        self.filtered_split_temp = None
+        self._last_split_filter_s = None
         if self._in_cycle and not self._waiting_post_peak:
             self._waiting_post_peak = True
             self._heating_stopped_at = now_s
@@ -267,7 +349,7 @@ class AntiYoyoLearner:
                 min(self.max_anticipation_h, float(data["anticipation_h"])),
             )
         if "learned_bias" in data:
-            self.learned_bias = float(data["learned_bias"])
+            self.learned_bias = max(0.5, min(3.0, float(data["learned_bias"])))
         if "cycle_count" in data:
             self.cycle_count = int(data["cycle_count"])
         if "last_overshoot" in data and data["last_overshoot"] is not None:

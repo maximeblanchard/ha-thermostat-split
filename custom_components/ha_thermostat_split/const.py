@@ -22,6 +22,7 @@ CONF_SENSOR_MAX_AGE = "sensor_max_age_minutes"
 CONF_FAILSAFE = "failsafe_minutes"
 CONF_RESYNC = "resync_minutes"
 CONF_ANTI_SPAM = "anti_spam_seconds"
+CONF_MODULATION_INTERVAL = "modulation_interval_seconds"
 CONF_INVERTER_MODE = "inverter_mode"
 CONF_INVERTER_MIN_OFFSET = "inverter_min_offset"
 CONF_INVERTER_MAX_OFFSET = "inverter_max_offset"
@@ -34,7 +35,7 @@ DEFAULTS: dict = {
     CONF_MIN_OFF: 5.0,            # min : cible de pause minimale
     CONF_COLD_TOL: 0.5,           # °C sous la cible pour démarrer
     CONF_HOT_TOL: 0.3,            # °C au-dessus de la cible pour arrêter
-    CONF_MAX_OVERSHOOT: 1.0,      # °C : dépassement maxi toléré pour tenir le cycle minimal
+    CONF_MAX_OVERSHOOT: 1.2,      # °C : dépassement maxi toléré (absorbe la bouffée d'air chaud au démarrage)
     CONF_MAX_UNDERSHOOT: 1.5,     # °C : sous-chauffe maxi toléré pendant la pause minimale
     CONF_SPLIT_SETPOINT: 24.0,    # °C statiques de repli envoyés au split
     CONF_MIN_TEMP: 15.0,
@@ -43,9 +44,10 @@ DEFAULTS: dict = {
     CONF_SENSOR_MAX_AGE: 90.0,    # min : capteur ignoré au-delà
     CONF_FAILSAFE: 30.0,          # min sans capteur valide avant arrêt de sécurité
     CONF_RESYNC: 10.0,            # min : réaffirmation de la consigne envoyée au split
-    CONF_ANTI_SPAM: 90.0,         # s : délai minimal entre deux modifications de consigne/état
+    CONF_ANTI_SPAM: 90.0,         # s : délai minimal entre START/STOP ou actions urgentes
+    CONF_MODULATION_INTERVAL: 300.0,  # s : délai minimal (5 min) entre deux ajustements de consigne inverter
     CONF_INVERTER_MODE: True,     # Modulation continue de la consigne split (inverter)
-    CONF_INVERTER_MIN_OFFSET: 0.5,  # °C au-dessus de la sonde split en maintien (modulation mini)
+    CONF_INVERTER_MIN_OFFSET: 1.5,  # °C au-dessus de la sonde split en maintien (évite les coupures sur sonde à 1 °C près)
     CONF_INVERTER_MAX_OFFSET: 3.0,  # °C au-dessus de la sonde split en chauffe rapide
     CONF_INVERTER_P_BAND: 1.5,    # °C de bande proportionnelle pour l'offset inverter
     CONF_LEARNING_ENABLED: True,  # Apprentissage auto de l'inertie et du biais anti-yoyo

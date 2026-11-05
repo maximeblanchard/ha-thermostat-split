@@ -25,6 +25,7 @@ from .const import (
     CONF_MIN_OFF,
     CONF_MIN_ON,
     CONF_MIN_TEMP,
+    CONF_MODULATION_INTERVAL,
     CONF_NAME,
     CONF_POWER,
     CONF_POWER_THRESHOLD,
@@ -93,9 +94,10 @@ def _build_options_schema(cur: dict[str, Any]) -> vol.Schema:
         vol.Required(CONF_MIN_TEMP, default=d[CONF_MIN_TEMP]): _num(5, 25, 0.5, "°C"),
         vol.Required(CONF_MAX_TEMP, default=d[CONF_MAX_TEMP]): _num(15, 30, 0.5, "°C"),
         vol.Required(CONF_ANTI_SPAM, default=d[CONF_ANTI_SPAM]): _num(15, 300, 5, "s"),
+        vol.Required(CONF_MODULATION_INTERVAL, default=d[CONF_MODULATION_INTERVAL]): _num(60, 900, 30, "s"),
         vol.Required(CONF_INVERTER_MODE, default=d[CONF_INVERTER_MODE]): selector.BooleanSelector(),
-        vol.Required(CONF_INVERTER_MIN_OFFSET, default=d[CONF_INVERTER_MIN_OFFSET]): _num(0.0, 2.5, 0.1, "°C"),
-        vol.Required(CONF_INVERTER_MAX_OFFSET, default=d[CONF_INVERTER_MAX_OFFSET]): _num(1.0, 5.0, 0.5, "°C"),
+        vol.Required(CONF_INVERTER_MIN_OFFSET, default=d[CONF_INVERTER_MIN_OFFSET]): _num(0.5, 3.0, 0.1, "°C"),
+        vol.Required(CONF_INVERTER_MAX_OFFSET, default=d[CONF_INVERTER_MAX_OFFSET]): _num(1.5, 5.0, 0.5, "°C"),
         vol.Required(CONF_INVERTER_P_BAND, default=d[CONF_INVERTER_P_BAND]): _num(0.5, 4.0, 0.1, "°C"),
         vol.Required(CONF_LEARNING_ENABLED, default=d[CONF_LEARNING_ENABLED]): selector.BooleanSelector(),
         vol.Required(CONF_SPLIT_SETPOINT, default=d[CONF_SPLIT_SETPOINT]): _num(16, 31, 0.5, "°C"),
@@ -115,7 +117,7 @@ def _build_options_schema(cur: dict[str, Any]) -> vol.Schema:
 class HAThermostatSplitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Ajout d'une pièce (ultra simple : 4 champs)."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         errors: dict[str, str] = {}
@@ -152,6 +154,8 @@ class HAThermostatSplitOptionsFlow(config_entries.OptionsFlow):
                 errors[CONF_SENSORS] = "no_sensor"
             elif user_input[CONF_MIN_TEMP] >= user_input[CONF_MAX_TEMP]:
                 errors[CONF_MIN_TEMP] = "bad_range"
+            elif user_input[CONF_INVERTER_MIN_OFFSET] > user_input[CONF_INVERTER_MAX_OFFSET]:
+                errors[CONF_INVERTER_MIN_OFFSET] = "bad_offset_range"
             else:
                 if isinstance(sensors, str):
                     user_input[CONF_SENSORS] = [sensors]
