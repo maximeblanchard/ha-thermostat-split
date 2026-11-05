@@ -1,14 +1,14 @@
 {
   "domain": "ha_thermostat_split",
   "name": "HA Thermostat Split",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "config_flow": true,
   "documentation": "https://github.com/maximeblanchard/ha-thermostat-split",
   "issue_tracker": "https://github.com/maximeblanchard/ha-thermostat-split/issues",
   "codeowners": ["@maximeblanchard"],
   "requirements": [],
-  "dependencies": [],
-  "after_dependencies": ["climate", "sensor"],
+  "dependencies": ["http", "frontend", "websocket_api"],
+  "after_dependencies": ["climate", "sensor", "lovelace"],
   "iot_class": "calculated",
   "integration_type": "device"
 }

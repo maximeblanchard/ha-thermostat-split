@@ -84,14 +84,36 @@ class CompressorTracker:
         _LOGGER.debug("Compresseur %s (%.0f W)", "ON" if on else "OFF", watts)
         self._notify()
 
+    @callback
+    def update_threshold(self, threshold_w: float) -> None:
+        """Met à jour dynamiquement le seuil de détection compresseur et réévalue l'état."""
+        if abs(self.threshold_w - threshold_w) < 0.01:
+            return
+        self.threshold_w = threshold_w
+        watts = self._to_watts(self.hass.states.get(self.power_entity))
+        if watts is None:
+            return
+        on = watts > self.threshold_w
+        if on != self.is_on:
+            now = dt_util.utcnow()
+            if on:
+                self._cycle_start = now
+            elif self._cycle_start is not None:
+                self._history.append((self._cycle_start, now))
+                self._cycle_start = None
+            self.is_on = on
+            self.since = now
+            self._notify()
+
     # ------------------------------------------------------------------ pièces actives
     def set_active(self, room_id: str, active: bool) -> None:
-        before = bool(self._active_rooms)
         if active:
+            changed = room_id not in self._active_rooms
             self._active_rooms.add(room_id)
         else:
+            changed = room_id in self._active_rooms
             self._active_rooms.discard(room_id)
-        if before != bool(self._active_rooms):
+        if changed:
             self._notify()
 
     def others_active(self, room_id: str) -> bool:
@@ -143,6 +165,8 @@ def get_tracker(hass: HomeAssistant, power_entity: str, threshold_w: float) -> C
         tracker = CompressorTracker(hass, power_entity, float(threshold_w))
         registry[power_entity] = tracker
         tracker.async_start()
+    else:
+        tracker.update_threshold(float(threshold_w))
     tracker.refs += 1
     return tracker
 

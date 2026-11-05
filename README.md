@@ -19,6 +19,7 @@ Thermostat **virtuel par pièce** qui pilote un split réel (entité `climate`) 
 - **Garantie d'appel unique** : mode et consigne envoyés en un seul appel de service pour ne jamais saturer ou bloquer le split.
 - **Suivi de la puissance électrique totale de la PAC** : compresseur considéré en marche si puissance > seuil (45 W par défaut).
 - **Coordination multi-split intelligente** : partage le compresseur entre plusieurs pièces (démarrage libre si le compresseur tourne déjà, arrêt libre si une autre pièce chauffe).
+- **Planning hebdomadaire 7 jours & Carte Lovelace intégrée** : package complet clé-en-main inspiré de *Netatmo* et *Panasonic Comfort Cloud* (créneaux par jour `OFF` / `Confort` / `Éco` / `Boost` / `Absent` / température libre, copie rapide *Lun–Ven* / *Week-end*, dérogation manuelle temporaire jusqu'au prochain créneau, zéro installation séparée).
 
 ---
 
@@ -57,6 +58,30 @@ logger:
   logs:
     custom_components.ha_thermostat_split: debug
 ```
+
+---
+
+## Carte Lovelace & Planning hebdomadaire intégré
+
+L'intégration embarque et enregistre **automatiquement** sa propre carte visuelle dans Home Assistant (aucune ressource JavaScript ni intégration tierce à installer).
+
+### Ajouter la carte sur votre tableau de bord
+1. Ouvrez votre tableau de bord → **Modifier** → **Ajouter une carte**.
+2. Recherchez **« HA Thermostat Split — Planning & Régulation »** et sélectionnez votre pièce (un éditeur visuel intégré permet de choisir le mode d'affichage : *Complet*, *Compact* ou *Planning uniquement*).
+
+*Ou en YAML :*
+```yaml
+type: custom:ha-thermostat-split-card
+entity: climate.salon
+layout_mode: full  # full | compact | schedule_only
+```
+
+### Fonctionnalités inspirées de Netatmo & Comfort Cloud
+- **Frise visuelle 7 jours (Lun–Dim)** : barres colorées sur 24h avec curseur temps réel.
+- **Éditeur par jour au pas de 15 minutes** : chaque créneau peut **couper le split (`OFF`)**, appliquer un **mode préréglé** (`Confort`, `Éco`, `Boost`, `Absent`) ou imposer une **température libre** (ex. `20,5 °C`).
+- **Températures des presets modifiables en un clic** : ajustez la température de *Confort* (ex. `20,0 °C` → `20,5 °C`) et tous vos créneaux *Confort* de la semaine suivent instantanément.
+- **Copie rapide** : dupliquez une journée type vers *Lun–Ven*, *Sam–Dim*, *Toute la semaine* ou vers les jours de votre choix.
+- **Dérogation temporaire automatique** : si le mode **Planning** est actif et que vous modifiez manuellement la température (ou coupez le split, y compris à la télécommande infrarouge), la consigne manuelle est maintenue jusqu'au prochain changement de créneau (sans coupure parasite à minuit) avec un bouton **« Reprendre »** en 1 clic.
 
 ---
 
@@ -102,6 +127,9 @@ Pour éliminer les dépassements intempestifs (*overshoots*) :
 - `biais_appris` : Biais split/pièce mémorisé en régime de maintien.
 - `compresseur_actif` / `compresseur_depuis_min` : État et durée du cycle du compresseur.
 - `cycles_aujourdhui` / `cycles_courts_aujourdhui` : Statistiques de la journée.
+- `planning_actif` / `creneau_actuel` / `prochain_changement` : État en direct du planning hebdomadaire.
+- `derogation_planning` : Indique si une dérogation manuelle temporaire est active jusqu'au prochain créneau.
+- `presets_temperatures` : Dictionnaire des températures associées aux modes `comfort`, `eco`, `boost` et `away`.
 - `decision` : Explication en clair du comportement actuel.
 
 ---

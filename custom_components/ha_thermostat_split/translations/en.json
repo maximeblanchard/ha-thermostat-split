@@ -16,7 +16,10 @@
       }
     },
     "error": {
-      "no_sensor": "Select at least one temperature sensor."
+      "no_sensor": "Select at least one temperature sensor.",
+      "invalid_split": "Select a valid climate entity.",
+      "self_split": "Cannot select an HA Thermostat Split virtual thermostat as the physical split.",
+      "already_configured_split": "This physical split is already controlled by another room."
     }
   },
   "options": {
@@ -55,8 +58,29 @@
     },
     "error": {
       "no_sensor": "Select at least one temperature sensor.",
+      "invalid_split": "Select a valid climate entity.",
+      "self_split": "Cannot select an HA Thermostat Split virtual thermostat as the physical split.",
+      "already_configured_split": "This physical split is already controlled by another room.",
       "bad_range": "Minimum temperature must be lower than maximum.",
       "bad_offset_range": "Minimum inverter offset must not exceed maximum inverter offset."
+    }
+  },
+  "entity": {
+    "climate": {
+      "thermostat": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "none": "Manual",
+              "schedule": "Schedule",
+              "comfort": "Comfort",
+              "eco": "Eco",
+              "boost": "Boost",
+              "away": "Away"
+            }
+          }
+        }
+      }
     }
   }
 }

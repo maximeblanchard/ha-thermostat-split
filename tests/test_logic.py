@@ -245,11 +245,12 @@ class AntiYoyoLearning(unittest.TestCase):
     def test_cycle_adaptation_overshoot(self):
         learner = AntiYoyoLearner(anticipation_h=0.25)
         learner.start_cycle(target=20.0, initial_temp=19.0)
-        learner.add_sample(100.0, 19.5)
-        learner.add_sample(200.0, 20.5)  # Dépassement de 0.5°C (> hot_tol 0.3)
+        self.assertFalse(learner.add_sample(100.0, 19.5))
+        self.assertFalse(learner.add_sample(200.0, 20.5))  # Dépassement de 0.5°C (> hot_tol 0.3)
         learner.stop_heating(200.0)
         # La température commence à redescendre (20.3 < 20.5 - 0.15), ce qui finalise le cycle
-        learner.add_sample(300.0, 20.3, hot_tolerance=0.3)
+        finalized = learner.add_sample(300.0, 20.3, hot_tolerance=0.3)
+        self.assertTrue(finalized)
         # L'anticipation doit avoir augmenté pour freiner plus tôt au prochain cycle
         self.assertGreater(learner.anticipation_h, 0.25)
         self.assertEqual(learner.last_overshoot, 0.5)

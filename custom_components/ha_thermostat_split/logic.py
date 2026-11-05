@@ -195,8 +195,11 @@ class AntiYoyoLearner:
         self._heating_stopped_at: float | None = None
         self._waiting_post_peak = False
 
-    def add_sample(self, now_s: float, temp: float, hot_tolerance: float = 0.3) -> None:
-        """Enregistre un échantillon de température et suit le pic d'inertie."""
+    def add_sample(self, now_s: float, temp: float, hot_tolerance: float = 0.3) -> bool:
+        """Enregistre un échantillon de température et suit le pic d'inertie.
+
+        Retourne True si un cycle vient d'être finalisé (nouvelles valeurs apprises à persister).
+        """
         self.history_slope.append((now_s, temp))
 
         if self._in_cycle:
@@ -209,6 +212,8 @@ class AntiYoyoLearner:
                 # Si plus de 15 min écoulées ou si la température redescend nettement sous le pic
                 if elapsed >= 900.0 or temp <= (self._cycle_peak_temp - 0.15):
                     self._finalize_cycle(hot_tolerance)
+                    return True
+        return False
 
     def update_split_temp(
         self,
@@ -277,11 +282,13 @@ class AntiYoyoLearner:
             return 0.0
         return round(self.anticipation_h * slope_deg_h, 3)
 
-    def update_steady_bias(self, split_temp: float, room_temp: float) -> None:
+    def update_steady_bias(self, split_temp: float, room_temp: float) -> bool:
         """Met à jour le biais moyen split - pièce en régime de maintien stabilisé."""
+        prev = self.learned_bias
         diff = max(0.0, min(3.5, split_temp - room_temp))
         updated = 0.05 * diff + 0.95 * self.learned_bias
         self.learned_bias = round(max(0.5, min(3.0, updated)), 2)
+        return abs(self.learned_bias - prev) >= 0.01
 
     def start_cycle(self, target: float, initial_temp: float) -> None:
         """Démarre le suivi d'un cycle de chauffe."""

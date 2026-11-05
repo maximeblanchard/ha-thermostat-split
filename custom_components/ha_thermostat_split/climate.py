@@ -72,11 +72,20 @@ from .logic import (
     compute_inverter_setpoint,
     decide,
 )
+from .schedule import (
+    ALL_PRESETS,
+    PRESET_COMFORT,
+    PRESET_NONE,
+    PRESET_SCHEDULE,
+    TEMP_PRESETS,
+    ScheduleEvaluation,
+    WeeklySchedule,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 CONTROL_INTERVAL = timedelta(seconds=30)
-ADOPT_GRACE = timedelta(seconds=90)
+ADOPT_GRACE = timedelta(seconds=180)
 
 
 async def async_setup_entry(
@@ -86,16 +95,19 @@ async def async_setup_entry(
 
 
 class HAThermostatSplit(ClimateEntity, RestoreEntity):
-    """Thermostat virtuel : moyenne de capteurs, modulation inverter et apprentissage anti-yoyo."""
+    """Thermostat virtuel : moyenne de capteurs, modulation inverter, planning hebdo et anti-yoyo."""
 
     _attr_has_entity_name = True
     _attr_name = None
+    _attr_translation_key = "thermostat"
     _attr_should_poll = False
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
+    _attr_preset_modes = ALL_PRESETS
     _attr_target_temperature_step = 0.5
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.PRESET_MODE
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
     )
@@ -155,6 +167,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         self._last_command: datetime | None = None
         self._last_setpoint_sent: float | None = None
         self._cycle_started_at: datetime | None = None
+        self._split_confirmed_heat = False
         self._user_target_changed = False
         self._tracker: CompressorTracker | None = None
         self._lock = asyncio.Lock()
@@ -168,6 +181,19 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         self._slope = 0.0
         self._anticip_offset = 0.0
 
+        # Planning hebdomadaire et modes préréglés
+        self._schedule = WeeklySchedule(
+            enabled=False,
+            min_temp=self._attr_min_temp,
+            max_temp=self._attr_max_temp,
+        )
+        self._schedule_store: Store | None = None
+        self._preset_mode: str = PRESET_NONE
+        self._override_block_sig: str | None = None
+        self._last_applied_block_sig: str | None = None
+        self._last_schedule_eval: ScheduleEvaluation | None = None
+        self._schedule_version: int = 1
+
     # ------------------------------------------------------------------ propriétés
     @property
     def current_temperature(self) -> float | None:
@@ -180,6 +206,10 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
     @property
     def hvac_mode(self) -> HVACMode:
         return self._hvac_mode
+
+    @property
+    def preset_mode(self) -> str:
+        return self._preset_mode
 
     @property
     def hvac_action(self) -> HVACAction:
@@ -198,6 +228,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         )
         tr = self._tracker
         age = tr.age_s(now) if tr else None
+        ev = self._last_schedule_eval or self._schedule.evaluate(dt_util.as_local(now))
         return {
             "split": self._split,
             "capteurs_utilises": self._used,
@@ -224,20 +255,59 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             "dernier_cycle_min": tr.last_cycle_minutes() if tr else None,
             "cycle_min_cible_min": self._params.min_on_s / 60,
             "pause_min_cible_min": self._params.min_off_s / 60,
+            "planning_actif": self._schedule.enabled and self._preset_mode == PRESET_SCHEDULE,
+            "planning_version": self._schedule_version,
+            "creneau_actuel": ev.slot_mode if self._schedule.enabled else None,
+            "prochain_changement": ev.next_change_label if self._schedule.enabled else None,
+            "derogation_planning": self._override_block_sig is not None,
+            "presets_temperatures": dict(self._schedule.presets),
             "decision": self._reason,
         }
 
     # ------------------------------------------------------------------ cycle de vie
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        self.hass.data.setdefault(DOMAIN, {}).setdefault("entities", {})[
+            self._entry.entry_id
+        ] = self
+
         old = await self.async_get_last_state()
+        restored_preset: str | None = None
         if old is not None:
             if old.state in (HVACMode.HEAT, HVACMode.OFF):
                 self._hvac_mode = HVACMode(old.state)
             try:
-                self._target = float(old.attributes.get(ATTR_TEMPERATURE, self._target))
+                restored_t = float(old.attributes.get(ATTR_TEMPERATURE, self._target))
+                self._target = max(self._attr_min_temp, min(self._attr_max_temp, restored_t))
             except (TypeError, ValueError):
                 pass
+            old_preset = old.attributes.get("preset_mode")
+            if isinstance(old_preset, str) and old_preset in ALL_PRESETS:
+                restored_preset = old_preset
+
+        self._schedule_store = Store(
+            self.hass, 1, f"{DOMAIN}_schedule_{self._entry.entry_id}"
+        )
+        sched_data = await self._schedule_store.async_load()
+        if sched_data:
+            self._schedule.load_data(sched_data)
+        self._schedule.update_bounds(self._attr_min_temp, self._attr_max_temp)
+
+        if restored_preset is not None:
+            if restored_preset == PRESET_SCHEDULE and not self._schedule.enabled:
+                self._preset_mode = PRESET_NONE
+            else:
+                self._preset_mode = restored_preset
+        elif self._schedule.enabled:
+            self._preset_mode = PRESET_SCHEDULE
+
+        if (
+            old is not None
+            and old.attributes.get("derogation_planning") is True
+            and self._preset_mode == PRESET_SCHEDULE
+            and self._schedule.enabled
+        ):
+            self._override_block_sig = self._schedule.evaluate(dt_util.now()).block_signature
 
         if self._learning_enabled:
             self._store = Store(self.hass, 1, f"{DOMAIN}_learning_{self._entry.entry_id}")
@@ -260,6 +330,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         split = self.hass.states.get(self._split)
         if split is not None and split.state == HVACMode.HEAT:
             self._demand = True
+            self._split_confirmed_heat = True
             self._cycle_started_at = now - timedelta(minutes=10)
             self._tracker.set_active(self._entry.entry_id, True)
             if self._learning_enabled and self._temp is not None:
@@ -276,12 +347,21 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         self._schedule_control()
 
     async def async_will_remove_from_hass(self) -> None:
+        self.hass.data.get(DOMAIN, {}).get("entities", {}).pop(self._entry.entry_id, None)
         if self._tracker is not None:
             self._tracker.set_active(self._entry.entry_id, False)
             release_tracker(self.hass, self._tracker)
             self._tracker = None
         if self._store is not None and self._learning_enabled:
             await self._store.async_save(self._learner.to_dict())
+        if self._schedule_store is not None:
+            await self._schedule_store.async_save(self._schedule.to_dict())
+
+    @callback
+    def _schedule_learner_save(self) -> None:
+        """Planifie une sauvegarde différée (30 s) des données apprises sans saturer le disque."""
+        if self._learning_enabled and self._store is not None:
+            self._store.async_delay_save(self._learner.to_dict, 30.0)
 
     # ------------------------------------------------------------------ déclencheurs
     @callback
@@ -302,20 +382,73 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         temp = kwargs.get(ATTR_TEMPERATURE)
         if temp is None:
             return
-        new_target = max(self._attr_min_temp, min(self._attr_max_temp, float(temp)))
-        if abs(new_target - self._target) >= 0.05:
-            self._user_target_changed = True
-        self._target = new_target
-        self.async_write_ha_state()
+        async with self._lock:
+            new_target = max(self._attr_min_temp, min(self._attr_max_temp, float(temp)))
+            if self._preset_mode == PRESET_SCHEDULE and self._schedule.enabled:
+                ev = self._schedule.evaluate(dt_util.now())
+                self._override_block_sig = ev.block_signature
+                self._hvac_mode = HVACMode.HEAT
+            elif self._preset_mode in TEMP_PRESETS:
+                if abs(new_target - self._schedule.presets[self._preset_mode]) >= 0.05:
+                    self._preset_mode = PRESET_NONE
+            if abs(new_target - self._target) >= 0.05:
+                self._user_target_changed = True
+            self._target = new_target
+            self.async_write_ha_state()
         await self._async_control()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         async with self._lock:
+            now = dt_util.utcnow()
+            ev = self._schedule.evaluate(dt_util.as_local(now))
             if hvac_mode == HVACMode.OFF:
+                if (
+                    self._preset_mode == PRESET_SCHEDULE
+                    and self._schedule.enabled
+                    and ev.hvac_mode != "off"
+                ):
+                    self._override_block_sig = ev.block_signature
                 self._hvac_mode = HVACMode.OFF
                 if self._demand:
-                    await self._stop(dt_util.utcnow(), forced=True)
+                    await self._stop(now, forced=True)
             elif hvac_mode == HVACMode.HEAT:
+                self._hvac_mode = HVACMode.HEAT
+                if self._preset_mode == PRESET_SCHEDULE and self._schedule.enabled:
+                    if ev.hvac_mode == "off":
+                        self._override_block_sig = ev.block_signature
+                        comfort_t = self._schedule.presets[PRESET_COMFORT]
+                        if abs(self._target - comfort_t) >= 0.05:
+                            self._target = comfort_t
+                            self._user_target_changed = True
+                    else:
+                        self._override_block_sig = None
+                        if ev.target_temp is not None and abs(self._target - ev.target_temp) >= 0.05:
+                            self._target = ev.target_temp
+                            self._user_target_changed = True
+            self.async_write_ha_state()
+        await self._async_control()
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        if preset_mode not in ALL_PRESETS:
+            return
+        async with self._lock:
+            now = dt_util.utcnow()
+            self._preset_mode = preset_mode
+            self._override_block_sig = None
+            if preset_mode == PRESET_SCHEDULE:
+                if not self._schedule.enabled:
+                    self._schedule.enabled = True
+                    self._schedule_version += 1
+                    if self._schedule_store is not None:
+                        await self._schedule_store.async_save(self._schedule.to_dict())
+                await self._evaluate_and_apply_schedule_locked(now, force_apply=True)
+            elif preset_mode in TEMP_PRESETS:
+                new_t = self._schedule.presets[preset_mode]
+                if abs(new_t - self._target) >= 0.05:
+                    self._user_target_changed = True
+                self._target = new_t
+                self._hvac_mode = HVACMode.HEAT
+            else:
                 self._hvac_mode = HVACMode.HEAT
             self.async_write_ha_state()
         await self._async_control()
@@ -325,6 +458,129 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
 
     async def async_turn_off(self) -> None:
         await self.async_set_hvac_mode(HVACMode.OFF)
+
+    # ------------------------------------------------------------------ API planning hebdomadaire
+    def get_schedule_payload(self) -> dict[str, Any]:
+        """Données complètes du planning envoyées à la carte Lovelace via WebSocket."""
+        ev = self._schedule.evaluate(dt_util.now())
+        self._last_schedule_eval = ev
+        return {
+            "entity_id": self.entity_id,
+            "name": self._entry.title,
+            "enabled": self._schedule.enabled,
+            "preset_mode": self._preset_mode,
+            "hvac_mode": self._hvac_mode,
+            "override_active": self._override_block_sig is not None,
+            "current_slot_mode": ev.slot_mode,
+            "current_slot_start": ev.slot_start,
+            "next_change": ev.next_change_label,
+            "next_hvac_mode": ev.next_hvac_mode,
+            "next_target_temp": ev.next_target_temp,
+            "min_temp": self._attr_min_temp,
+            "max_temp": self._attr_max_temp,
+            "presets": dict(self._schedule.presets),
+            "days": self._schedule.to_dict()["days"],
+            "version": self._schedule_version,
+        }
+
+    async def async_update_schedule(
+        self,
+        *,
+        enabled: bool | None = None,
+        presets: dict[str, Any] | None = None,
+        days: dict[str, Any] | None = None,
+        apply_now: bool = True,
+    ) -> None:
+        """Met à jour et persiste le planning hebdomadaire depuis la carte Lovelace."""
+        async with self._lock:
+            if presets is not None:
+                self._schedule.update_presets(presets)
+                if self._preset_mode in TEMP_PRESETS:
+                    new_t = self._schedule.presets[self._preset_mode]
+                    if abs(new_t - self._target) >= 0.05:
+                        self._target = new_t
+                        self._user_target_changed = True
+            if days is not None:
+                self._schedule.update_days(days)
+            if enabled is not None:
+                self._schedule.enabled = bool(enabled)
+                if self._schedule.enabled:
+                    self._preset_mode = PRESET_SCHEDULE
+                elif self._preset_mode == PRESET_SCHEDULE:
+                    self._preset_mode = PRESET_NONE
+                    self._override_block_sig = None
+
+            self._schedule_version += 1
+            if self._schedule_store is not None:
+                await self._schedule_store.async_save(self._schedule.to_dict())
+
+            if apply_now and self._schedule.enabled and self._preset_mode == PRESET_SCHEDULE:
+                await self._evaluate_and_apply_schedule_locked(
+                    dt_util.utcnow(), force_apply=True
+                )
+            self.async_write_ha_state()
+        await self._async_control()
+
+    async def async_clear_schedule_override(self) -> None:
+        """Annule une dérogation manuelle temporaire et réapplique immédiatement le créneau actif."""
+        async with self._lock:
+            self._override_block_sig = None
+            if self._schedule.enabled:
+                self._preset_mode = PRESET_SCHEDULE
+                await self._evaluate_and_apply_schedule_locked(
+                    dt_util.utcnow(), force_apply=True
+                )
+            self._schedule_version += 1
+            self.async_write_ha_state()
+        await self._async_control()
+
+    async def _evaluate_and_apply_schedule_locked(
+        self, now: datetime, force_apply: bool = False
+    ) -> None:
+        """Applique les transitions horaires du planning (appelé sous self._lock)."""
+        ev = self._schedule.evaluate(dt_util.as_local(now))
+        self._last_schedule_eval = ev
+        if not self._schedule.enabled or self._preset_mode != PRESET_SCHEDULE:
+            return
+
+        if force_apply:
+            self._override_block_sig = None
+            self._last_applied_block_sig = None
+
+        if self._override_block_sig is not None:
+            if ev.block_signature != self._override_block_sig:
+                # Changement de créneau atteint : fin automatique de la dérogation manuelle
+                self._override_block_sig = None
+            else:
+                return
+
+        needs_sync = (
+            ev.block_signature != self._last_applied_block_sig
+            or (ev.hvac_mode == "off" and self._hvac_mode != HVACMode.OFF)
+            or (
+                ev.hvac_mode == "heat"
+                and (
+                    self._hvac_mode != HVACMode.HEAT
+                    or (
+                        ev.target_temp is not None
+                        and abs(self._target - ev.target_temp) >= 0.05
+                    )
+                )
+            )
+        )
+        if not needs_sync:
+            return
+
+        self._last_applied_block_sig = ev.block_signature
+        if ev.hvac_mode == "off":
+            self._hvac_mode = HVACMode.OFF
+            if self._demand:
+                await self._stop(now, forced=True)
+        elif ev.target_temp is not None:
+            if abs(self._target - ev.target_temp) >= 0.05:
+                self._target = ev.target_temp
+                self._user_target_changed = True
+            self._hvac_mode = HVACMode.HEAT
 
     # ------------------------------------------------------------------ température
     def _compute_temperature(self, now: datetime) -> float | None:
@@ -368,9 +624,11 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             now_ts = now.timestamp()
             self._temp = self._compute_temperature(now)
             self._adopt_split_state(now)
+            await self._evaluate_and_apply_schedule_locked(now)
 
             if self._temp is not None:
-                self._learner.add_sample(now_ts, self._temp, self._params.hot_tolerance)
+                if self._learner.add_sample(now_ts, self._temp, self._params.hot_tolerance):
+                    self._schedule_learner_save()
                 self._slope = self._learner.compute_slope()
                 self._anticip_offset = (
                     self._learner.get_anticipation_offset(self._slope)
@@ -393,7 +651,22 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
                     )
 
             if self._hvac_mode == HVACMode.OFF:
-                self._reason = "régulation arrêtée"
+                if (
+                    self._schedule.enabled
+                    and self._preset_mode == PRESET_SCHEDULE
+                    and self._last_schedule_eval is not None
+                    and self._last_schedule_eval.next_change_label
+                ):
+                    prefix = (
+                        "coupé en dérogation"
+                        if self._override_block_sig is not None
+                        else "planning : coupé"
+                    )
+                    self._reason = (
+                        f"{prefix} (prochain créneau à {self._last_schedule_eval.next_change_label})"
+                    )
+                else:
+                    self._reason = "régulation arrêtée"
                 self.async_write_ha_state()
                 return
 
@@ -443,27 +716,80 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
 
     @callback
     def _adopt_split_state(self, now: datetime) -> None:
-        """Si quelqu'un agit directement sur le split, on s'aligne (hors période de grâce)."""
-        if self._last_command is not None and now - self._last_command < ADOPT_GRACE:
-            return
+        """Si quelqu'un agit directement sur le split (IR / appli), on s'aligne symétriquement."""
         split = self.hass.states.get(self._split)
         if split is None or split.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return
         is_heat = split.state == HVACMode.HEAT
-        if is_heat != self._demand:
-            _LOGGER.debug("%s : split passé en %s hors régulation, alignement", self.entity_id, split.state)
-            self._demand = is_heat
-            self._cycle_started_at = now if is_heat else None
-            # Si le split physique a été éteint manuellement, aligner le thermostat virtuel sur OFF
-            # pour éviter qu'il ne se rallume tout seul au prochain cycle
-            if not is_heat and self._hvac_mode == HVACMode.HEAT:
+        if is_heat:
+            self._split_confirmed_heat = True
+
+        if self._last_command is not None and now - self._last_command < ADOPT_GRACE:
+            return
+
+        if self._demand and not is_heat:
+            # Protection latence Cloud : si l'état cloud n'a pas encore confirmé 'heat' mais que
+            # la puissance électrique PAC confirme la marche dans les 5 premières minutes, on attend
+            if (
+                not self._split_confirmed_heat
+                and self._last_command is not None
+                and now - self._last_command < timedelta(seconds=300)
+                and self._tracker is not None
+                and self._tracker.is_on
+            ):
+                return
+
+            _LOGGER.info(
+                "%s : arrêt externe du split détecté (%s), thermostat virtuel basculé sur OFF",
+                self.entity_id,
+                split.state,
+            )
+            self._demand = False
+            self._split_confirmed_heat = False
+            self._cycle_started_at = None
+            if self._hvac_mode == HVACMode.HEAT:
                 self._hvac_mode = HVACMode.OFF
-                _LOGGER.info("%s : arrêt manuel du split détecté, thermostat virtuel basculé sur OFF", self.entity_id)
+                if self._preset_mode == PRESET_SCHEDULE and self._schedule.enabled:
+                    ev = self._schedule.evaluate(dt_util.as_local(now))
+                    if ev.hvac_mode != "off":
+                        self._override_block_sig = ev.block_signature
+            if self._learning_enabled:
+                self._learner.stop_heating(now.timestamp())
+                self._schedule_learner_save()
             if self._tracker is not None:
-                self._tracker.set_active(self._entry.entry_id, is_heat)
+                self._tracker.set_active(self._entry.entry_id, False)
+
+        elif not self._demand and is_heat:
+            _LOGGER.info(
+                "%s : allumage externe du split détecté, prise en charge par la régulation",
+                self.entity_id,
+            )
+            self._demand = True
+            self._split_confirmed_heat = True
+            self._cycle_started_at = now
+            if self._hvac_mode == HVACMode.OFF:
+                self._hvac_mode = HVACMode.HEAT
+                if self._preset_mode == PRESET_SCHEDULE and self._schedule.enabled:
+                    ev = self._schedule.evaluate(dt_util.as_local(now))
+                    if ev.hvac_mode == "off":
+                        self._override_block_sig = ev.block_signature
+                        self._target = self._schedule.presets[PRESET_COMFORT]
+                    elif ev.target_temp is not None:
+                        self._target = ev.target_temp
+            if self._learning_enabled and self._temp is not None:
+                self._learner.start_cycle(self._target, self._temp)
+            if self._tracker is not None:
+                self._tracker.set_active(self._entry.entry_id, True)
 
     # ------------------------------------------------------------------ commandes vers le split
     async def _call(self, service: str, data: dict[str, Any]) -> bool:
+        if self._split == self.entity_id:
+            _LOGGER.error(
+                "%s : auto-référence détectée sur %s, appel bloqué",
+                self.entity_id,
+                self._split,
+            )
+            return False
         try:
             await self.hass.services.async_call(
                 "climate", service, {"entity_id": self._split, **data}, blocking=True
@@ -532,7 +858,8 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             and self._tracker
             and self._tracker.is_on
         ):
-            self._learner.update_steady_bias(split_temp, self._temp)
+            if self._learner.update_steady_bias(split_temp, self._temp):
+                self._schedule_learner_save()
 
         return setpoint
 
@@ -568,9 +895,12 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
 
     async def _start(self, now: datetime) -> None:
         prev_start = self._cycle_started_at
+        split = self.hass.states.get(self._split)
+        was_heat = split is not None and split.state == HVACMode.HEAT
         self._cycle_started_at = now
         if await self._send_heat(cycle_elapsed_s=0.0):
             self._demand = True
+            self._split_confirmed_heat = was_heat
             self._last_command = now
             self._user_target_changed = False
             self._tracker.set_active(self._entry.entry_id, True)
@@ -594,31 +924,27 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             ok = await self._call("turn_off", {})
         if ok:
             self._demand = False
+            self._split_confirmed_heat = False
             self._cycle_started_at = None
             self._user_target_changed = False
             self._last_command = now
             self._tracker.set_active(self._entry.entry_id, False)
             if self._learning_enabled:
                 self._learner.stop_heating(now.timestamp())
-                if self._store is not None:
-                    self.hass.async_create_task(self._store.async_save(self._learner.to_dict()))
+                self._schedule_learner_save()
             else:
                 self._learner.filtered_split_temp = None
             _LOGGER.debug("%s : arrêt (%s)", self.entity_id, self._reason)
 
     async def _reassert(self, now: datetime) -> None:
-        """Ajuste la consigne modulante vers le split sans spammer ni provoquer de mise en veille."""
+        """Ajuste la consigne modulante vers le split et réaffirme périodiquement l'état."""
         if not self._demand:
             return
         if self._last_command is not None and now - self._last_command < self._anti_spam:
             return
 
         split = self.hass.states.get(self._split)
-        if split is None:
-            return
-        try:
-            current = float(split.attributes.get(ATTR_TEMPERATURE))
-        except (TypeError, ValueError):
+        if split is None or split.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return
 
         cycle_elapsed_s = (
@@ -626,6 +952,21 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             if self._cycle_started_at is not None
             else None
         )
+        resync_due = self._last_command is None or (now - self._last_command >= self._resync)
+
+        # Si le split n'est toujours pas en mode HEAT après l'intervalle de resynchronisation
+        if split.state != HVACMode.HEAT:
+            if resync_due and await self._send_heat(cycle_elapsed_s=cycle_elapsed_s):
+                self._last_command = now
+                self._user_target_changed = False
+                _LOGGER.debug("%s : réaffirmation périodique du mode chauffe", self.entity_id)
+            return
+
+        try:
+            current = float(split.attributes.get(ATTR_TEMPERATURE))
+        except (TypeError, ValueError):
+            return
+
         wanted = self._split_setpoint_to_send(cycle_elapsed_s=cycle_elapsed_s)
         raw_split_temp = self._get_split_current_temp()
         hvac_action = split.attributes.get("hvac_action")
@@ -670,15 +1011,19 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
                 and cycle_elapsed_s < self._inverter_params.startup_grace_s
             ):
                 return
-            # Temporisation de modulation lente (5 min par défaut)
-            if (
-                self._last_command is not None
-                and now - self._last_command < self._modulation_interval
-            ):
-                return
-            # Zone morte de 1,0 °C pour éviter l'effet ping-pong de ±0,5 °C
-            if abs(current - wanted) < 1.0:
-                return
+            if resync_due and abs(current - wanted) >= 0.5:
+                # Réaffirmation périodique douce une fois resync_minutes écoulé
+                pass
+            else:
+                # Temporisation de modulation lente (5 min par défaut)
+                if (
+                    self._last_command is not None
+                    and now - self._last_command < self._modulation_interval
+                ):
+                    return
+                # Zone morte de 1,0 °C pour éviter l'effet ping-pong de ±0,5 °C
+                if abs(current - wanted) < 1.0:
+                    return
         elif abs(current - wanted) < 0.4:
             self._user_target_changed = False
             return

@@ -6,8 +6,8 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import callback
-from homeassistant.helpers import selector
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er, selector
 
 from .const import (
     CONF_ANTI_SPAM,
@@ -51,14 +51,53 @@ def _num(min_: float, max_: float, step: float, unit: str | None = None) -> sele
     )
 
 
-def _build_user_schema(cur: dict[str, Any]) -> vol.Schema:
+def _excluded_splits(hass: HomeAssistant, current_entry_id: str | None = None) -> list[str]:
+    """Exclut les thermostats virtuels de cette intégration et les splits déjà attribués."""
+    excluded: set[str] = set()
+    ent_reg = er.async_get(hass)
+    for ent in ent_reg.entities.values():
+        if ent.platform == DOMAIN and ent.domain == "climate":
+            excluded.add(ent.entity_id)
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if current_entry_id is not None and entry.entry_id == current_entry_id:
+            continue
+        merged = {**entry.data, **entry.options}
+        used_split = merged.get(CONF_SPLIT)
+        if isinstance(used_split, str) and used_split:
+            excluded.add(used_split)
+    return sorted(excluded)
+
+
+def _validate_split_choice(
+    hass: HomeAssistant, split_entity: str | None, current_entry_id: str | None = None
+) -> str | None:
+    """Vérifie qu'on ne pilote ni un thermostat virtuel ni un split déjà géré ailleurs."""
+    if not split_entity:
+        return "invalid_split"
+    ent_entry = er.async_get(hass).async_get(split_entity)
+    if ent_entry is not None and ent_entry.platform == DOMAIN:
+        return "self_split"
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if current_entry_id is not None and entry.entry_id == current_entry_id:
+            continue
+        merged = {**entry.data, **entry.options}
+        if merged.get(CONF_SPLIT) == split_entity:
+            return "already_configured_split"
+    return None
+
+
+def _build_user_schema(cur: dict[str, Any], excluded_splits: list[str]) -> vol.Schema:
     """Schéma ultra-simplifié pour l'ajout initial d'une pièce (4 champs essentiels)."""
     return vol.Schema(
         {
             vol.Required(CONF_NAME, default=cur.get(CONF_NAME, "Salon")): str,
             vol.Required(
                 CONF_SPLIT, description={"suggested_value": cur.get(CONF_SPLIT)}
-            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="climate")),
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="climate", exclude_entities=excluded_splits
+                )
+            ),
             vol.Required(
                 CONF_SENSORS, description={"suggested_value": cur.get(CONF_SENSORS)}
             ): selector.EntitySelector(
@@ -73,13 +112,17 @@ def _build_user_schema(cur: dict[str, Any]) -> vol.Schema:
     )
 
 
-def _build_options_schema(cur: dict[str, Any]) -> vol.Schema:
+def _build_options_schema(cur: dict[str, Any], excluded_splits: list[str]) -> vol.Schema:
     """Schéma complet disponible dans les options (bouton 'Configurer')."""
     d = {**DEFAULTS, **cur}
     fields: dict[Any, Any] = {
         vol.Required(
             CONF_SPLIT, description={"suggested_value": cur.get(CONF_SPLIT)}
-        ): selector.EntitySelector(selector.EntitySelectorConfig(domain="climate")),
+        ): selector.EntitySelector(
+            selector.EntitySelectorConfig(
+                domain="climate", exclude_entities=excluded_splits
+            )
+        ),
         vol.Required(
             CONF_SENSORS, description={"suggested_value": cur.get(CONF_SENSORS)}
         ): selector.EntitySelector(
@@ -121,9 +164,13 @@ class HAThermostatSplitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         errors: dict[str, str] = {}
+        excluded = _excluded_splits(self.hass)
         if user_input is not None:
             sensors = user_input.get(CONF_SENSORS)
-            if not sensors:
+            split_err = _validate_split_choice(self.hass, user_input.get(CONF_SPLIT))
+            if split_err:
+                errors[CONF_SPLIT] = split_err
+            elif not sensors:
                 errors[CONF_SENSORS] = "no_sensor"
             else:
                 if isinstance(sensors, str):
@@ -132,7 +179,7 @@ class HAThermostatSplitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=_build_user_schema(user_input or {}),
+            data_schema=_build_user_schema(user_input or {}, excluded),
             errors=errors,
         )
 
@@ -148,9 +195,17 @@ class HAThermostatSplitOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         errors: dict[str, str] = {}
         current = {**self.config_entry.data, **self.config_entry.options}
+        excluded = _excluded_splits(self.hass, current_entry_id=self.config_entry.entry_id)
         if user_input is not None:
             sensors = user_input.get(CONF_SENSORS)
-            if not sensors:
+            split_err = _validate_split_choice(
+                self.hass,
+                user_input.get(CONF_SPLIT),
+                current_entry_id=self.config_entry.entry_id,
+            )
+            if split_err:
+                errors[CONF_SPLIT] = split_err
+            elif not sensors:
                 errors[CONF_SENSORS] = "no_sensor"
             elif user_input[CONF_MIN_TEMP] >= user_input[CONF_MAX_TEMP]:
                 errors[CONF_MIN_TEMP] = "bad_range"
@@ -164,6 +219,6 @@ class HAThermostatSplitOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="init",
-            data_schema=_build_options_schema(current),
+            data_schema=_build_options_schema(current, excluded),
             errors=errors,
         )
