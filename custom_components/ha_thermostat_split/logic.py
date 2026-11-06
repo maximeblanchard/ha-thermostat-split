@@ -170,31 +170,25 @@ def compute_inverter_setpoint(
     # 3. Démarrage doux progressif anti-pic (> 2 kW)
     step = params.step if params.step > 0 else 0.5
     if in_startup:
-        # En phase de démarrage, l'objectif est d'empêcher le compresseur de s'emballer
-        # à pleine puissance (> 2 kW). On maintient un delta (consigne - sonde split)
-        # strictement maîtrisé par rapport à la température RÉELLE mesurée par le split
-        # et plafonné par rapport à la cible de la pièce :
-        # - Palier 1 (0 à 180s) : consigne bridée à min(cible, sonde_split + 0.5 °C)
-        # - Palier 2 (180 à grace_s) : consigne bridée à min(cible + 0.5, sonde_split + 1.0 °C)
-        split_ref = split_temp if split_temp is not None else room_temp
+        # En phase de démarrage, l'objectif est d'empêcher un saut thermique brutal
+        # tout en assurant une consigne toujours supérieure à la sonde du split (+0.5 °C)
+        # pour éviter que le split ne coupe prématurément en thermo-off (cycles courts).
+        # - Palier 1 (0 à 180s) : consigne bridée à sonde_split + 0.5 °C
+        # - Palier 2 (180 à grace_s) : consigne bridée à sonde_split + 1.0 °C
+        split_ref = split_temp if split_temp is not None else (room_temp + clamped_bias)
         if cycle_elapsed_s < 180.0:
-            soft_cap = min(target_temp, split_ref + 0.5)
-            soft_sp = round(soft_cap / step) * step
+            soft_sp = round((split_ref + 0.5) / step) * step
             mode = "démarrage très doux (anti-pic phase 1)"
         else:
-            soft_cap = min(target_temp + 0.5, split_ref + 1.0)
-            soft_sp = round(soft_cap / step) * step
+            soft_sp = round((split_ref + 1.0) / step) * step
             mode = "montée progressive (anti-pic phase 2)"
         raw_setpoint = min(raw_setpoint, soft_sp)
 
     rounded = round(raw_setpoint / step) * step
 
-    # En mode chauffe établi (après démarrage doux), la consigne envoyée ne doit pas
-    # être inférieure à la cible de la pièce pour éviter un passage intempestif en veille
-    if in_startup:
-        final = min(max_temp, max(min_temp, rounded))
-    else:
-        final = min(max_temp, max(min_temp, max(target_temp, rounded)))
+    # En mode chauffe, la consigne envoyée ne doit pas être inférieure à la cible de la pièce
+    # pour éviter qu'elle ne coupe prématurément
+    final = min(max_temp, max(min_temp, max(target_temp, rounded)))
 
     return (round(final, 1), round(offset, 2), mode)
 
