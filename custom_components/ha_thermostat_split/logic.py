@@ -107,6 +107,7 @@ def compute_inverter_setpoint(
     learned_bias: float = 1.5,
     filtered_split_temp: float | None = None,
     cycle_elapsed_s: float | None = None,
+    outdoor_temp: float | None = None,
     min_temp: float = 15.0,
     max_temp: float = 30.0,
 ) -> tuple[float, float, str]:
@@ -138,17 +139,25 @@ def compute_inverter_setpoint(
     else:
         ref_split_temp = raw_clamped
 
-    # 2. Calcul de l'offset dynamique proportionnel
+    # 2. Calcul de l'offset dynamique proportionnel avec feed-forward météo
+    weather_offset = 0.0
+    if outdoor_temp is not None:
+        if outdoor_temp < 8.0:
+            weather_offset = min(0.5, max(0.0, (8.0 - outdoor_temp) * 0.04))
+        elif outdoor_temp > 14.0:
+            weather_offset = -0.2
+
     p_band = max(0.1, params.p_band)
     if effective_error >= p_band:
         offset = params.max_offset
         mode = "chauffe rapide"
     elif effective_error <= 0.0:
-        offset = params.min_offset
+        offset = max(0.2, params.min_offset + weather_offset)
         mode = "maintien / modulation minimale (~500 W)"
     else:
         ratio = effective_error / p_band
-        offset = params.min_offset + ratio * (params.max_offset - params.min_offset)
+        base_offset = params.min_offset + ratio * (params.max_offset - params.min_offset)
+        offset = min(params.max_offset, max(0.3, base_offset + weather_offset * (1.0 - ratio)))
         mode = f"modulation inverter ({ratio * 100:.0f}%)"
 
     raw_setpoint = ref_split_temp + offset
@@ -181,7 +190,7 @@ def compute_inverter_setpoint(
 
 
 class AntiYoyoLearner:
-    """Apprentissage statistique de l'inertie thermique et du biais capteur."""
+    """Apprentissage statistique de l'inertie thermique, du biais capteur et de l'efficacité thermique."""
 
     def __init__(
         self,
@@ -189,12 +198,18 @@ class AntiYoyoLearner:
         learned_bias: float = 1.5,
         min_anticipation_h: float = 0.05,
         max_anticipation_h: float = 0.8,
+        tau_h: float | None = None,
+        loss_rate_per_10k: float | None = None,
     ) -> None:
         self.anticipation_h = anticipation_h
         self.learned_bias = learned_bias
         self.min_anticipation_h = min_anticipation_h
         self.max_anticipation_h = max_anticipation_h
+        self.tau_h = tau_h
+        self.loss_rate_per_10k = loss_rate_per_10k
+        self.outdoor_temp: float | None = None
         self.history_slope: deque[tuple[float, float]] = deque(maxlen=60)
+        self.history_cooling: deque[tuple[float, float, float]] = deque(maxlen=60)
         self.cycle_count = 0
         self.last_overshoot: float | None = None
         self.filtered_split_temp: float | None = None
@@ -204,6 +219,7 @@ class AntiYoyoLearner:
         self._in_cycle = False
         self._heating_stopped_at: float | None = None
         self._waiting_post_peak = False
+        self._last_cooling_eval_s: float | None = None
 
     def add_sample(self, now_s: float, temp: float, hot_tolerance: float = 0.3) -> bool:
         """Enregistre un échantillon de température et suit le pic d'inertie.
@@ -224,6 +240,74 @@ class AntiYoyoLearner:
                     self._finalize_cycle(hot_tolerance)
                     return True
         return False
+
+    def add_cooling_sample(
+        self, now_s: float, room_temp: float, outdoor_temp: float | None
+    ) -> bool:
+        """Enregistre un échantillon hors-chauffe pour quantifier la déperdition thermique."""
+        if outdoor_temp is None:
+            return False
+        self.outdoor_temp = outdoor_temp
+        # Si le chauffage est arrêté depuis au moins 15 min (inertie immédiate de surface dissipée)
+        if not self._in_cycle and self._heating_stopped_at is not None:
+            if now_s - self._heating_stopped_at >= 900.0:
+                self.history_cooling.append((now_s, room_temp, outdoor_temp))
+                if (
+                    self._last_cooling_eval_s is None
+                    or now_s - self._last_cooling_eval_s >= 1200.0
+                ):
+                    return self._evaluate_thermal_efficiency(now_s)
+        return False
+
+    def _evaluate_thermal_efficiency(self, now_s: float) -> bool:
+        """Calcule la constante d'inertie tau (en heures) et le taux de déperdition spécifique."""
+        if len(self.history_cooling) < 4:
+            return False
+        t_start, r_start, o_start = self.history_cooling[0]
+        t_end, r_end, o_end = self.history_cooling[-1]
+        dt_h = (t_end - t_start) / 3600.0
+        if dt_h < 0.4:
+            return False
+
+        temp_drop = r_start - r_end
+        delta_in_out = ((r_start + r_end) / 2.0) - ((o_start + o_end) / 2.0)
+
+        # Gradient intérieur-extérieur significatif (>= 2 °C) et baisse mesurable
+        if temp_drop >= 0.05 and delta_in_out >= 2.0:
+            cool_rate_deg_h = temp_drop / dt_h
+            loss_coeff = cool_rate_deg_h / delta_in_out
+            tau_inst = 1.0 / max(0.005, loss_coeff)
+            tau_clamped = max(5.0, min(120.0, tau_inst))
+            if self.tau_h is None:
+                self.tau_h = round(tau_clamped, 1)
+            else:
+                self.tau_h = round(0.15 * tau_clamped + 0.85 * self.tau_h, 1)
+            self.loss_rate_per_10k = round(10.0 / self.tau_h, 2)
+            self._last_cooling_eval_s = now_s
+            return True
+        return False
+
+    @property
+    def thermal_efficiency_label(self) -> str:
+        """Diagnostic qualitatif de l'efficacité et de l'inertie thermique."""
+        if self.tau_h is None:
+            return "Apprentissage de l'inertie en cours"
+        if self.tau_h >= 45.0:
+            return f"Excellente inertie (tau = {self.tau_h:.0f}h)"
+        if self.tau_h >= 30.0:
+            return f"Bonne inertie thermique (tau = {self.tau_h:.0f}h)"
+        if self.tau_h >= 18.0:
+            return f"Inertie moyenne (tau = {self.tau_h:.0f}h)"
+        return f"Faible inertie / Refroidissement rapide (tau = {self.tau_h:.0f}h)"
+
+    def estimated_heat_need_w(self, target_temp: float) -> int | None:
+        """Puissance thermique théorique de maintien estimée en Watts."""
+        if self.outdoor_temp is None:
+            return None
+        delta = max(0.0, target_temp - self.outdoor_temp)
+        tau = self.tau_h if self.tau_h is not None else 35.0
+        loss_w_per_k = max(20.0, min(300.0, 4500.0 / tau))
+        return int(round(loss_w_per_k * delta))
 
     def update_split_temp(
         self,
@@ -354,6 +438,8 @@ class AntiYoyoLearner:
             "learned_bias": self.learned_bias,
             "cycle_count": self.cycle_count,
             "last_overshoot": self.last_overshoot,
+            "tau_h": self.tau_h,
+            "loss_rate_per_10k": self.loss_rate_per_10k,
         }
 
     def load_data(self, data: dict[str, Any]) -> None:
@@ -371,3 +457,7 @@ class AntiYoyoLearner:
             self.cycle_count = int(data["cycle_count"])
         if "last_overshoot" in data and data["last_overshoot"] is not None:
             self.last_overshoot = float(data["last_overshoot"])
+        if "tau_h" in data and data["tau_h"] is not None:
+            self.tau_h = max(5.0, min(120.0, float(data["tau_h"])))
+        if "loss_rate_per_10k" in data and data["loss_rate_per_10k"] is not None:
+            self.loss_rate_per_10k = float(data["loss_rate_per_10k"])

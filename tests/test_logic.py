@@ -214,6 +214,59 @@ class InverterModulation(unittest.TestCase):
         self.assertIn("modulation minimale", desc)
 
 
+    def test_outdoor_weather_feedforward(self):
+        # Temp pièce = 20.0, Cible = 20.0 (erreur 0.0)
+        # Par temps doux (15°C ext), maintien = 0.5°C
+        _, off_mild, _ = compute_inverter_setpoint(
+            room_temp=20.0,
+            target_temp=20.0,
+            split_temp=21.0,
+            fallback_setpoint=24.0,
+            params=self.params,
+            outdoor_temp=15.0,
+        )
+        self.assertLessEqual(off_mild, 0.5)
+
+        # Par grand froid (0°C ext), l'anticipation météo feed-forward soutient l'allure de croisière
+        _, off_cold, _ = compute_inverter_setpoint(
+            room_temp=20.0,
+            target_temp=20.0,
+            split_temp=21.0,
+            fallback_setpoint=24.0,
+            params=self.params,
+            outdoor_temp=0.0,
+        )
+        self.assertGreater(off_cold, off_mild)
+        self.assertAlmostEqual(off_cold, 0.82, delta=0.05)
+
+    def test_thermal_efficiency_learning(self):
+        learner = AntiYoyoLearner()
+        # Chauffage arrêté à t=0
+        learner.stop_heating(0.0)
+
+        # Les 15 premières minutes sont ignorées (inertie de surface)
+        learner.add_cooling_sample(300.0, 19.5, 5.0)
+        self.assertIsNone(learner.tau_h)
+
+        # De t=900s à t=4500s (1h de refroidissement régulier : baisse de 19.5 à 19.3 °C par 5°C ext)
+        learner.add_cooling_sample(900.0, 19.5, 5.0)
+        learner.add_cooling_sample(1800.0, 19.45, 5.0)
+        learner.add_cooling_sample(2700.0, 19.40, 5.0)
+        learner.add_cooling_sample(3600.0, 19.35, 5.0)
+        ok = learner.add_cooling_sample(4500.0, 19.30, 5.0)
+        self.assertTrue(ok)
+        self.assertIsNotNone(learner.tau_h)
+        self.assertGreater(learner.tau_h, 30.0)  # Bonne ou excellente inertie
+        self.assertIn("tau =", learner.thermal_efficiency_label)
+
+        # Persistance et restauration
+        saved = learner.to_dict()
+        self.assertIn("tau_h", saved)
+        new_learner = AntiYoyoLearner()
+        new_learner.load_data(saved)
+        self.assertEqual(new_learner.tau_h, learner.tau_h)
+
+
 class AntiYoyoLearning(unittest.TestCase):
     def test_slope_and_anticipation(self):
         learner = AntiYoyoLearner(anticipation_h=0.25)

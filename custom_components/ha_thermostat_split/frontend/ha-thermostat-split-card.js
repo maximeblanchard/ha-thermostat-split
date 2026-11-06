@@ -255,6 +255,7 @@ class HAThermostatSplitCard extends HTMLElement {
     this._toast = "";
     this._selectedDay = null; // 0..6 quand l'éditeur d'un jour est ouvert
     this._showPresetTuning = false;
+    this._showDiagnostics = false;
     this._scheduleExpanded = true;
     this._pendingTarget = null;
     this._tempDebounce = null;
@@ -544,6 +545,107 @@ class HAThermostatSplitCard extends HTMLElement {
           background: #f59e0b;
           color: #fff;
           white-space: nowrap;
+        }
+
+        .diag-toggle-bar {
+          display: flex;
+          justify-content: center;
+          margin: 6px 0 10px;
+        }
+        .diag-toggle-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          border: 1px solid var(--divider-color, rgba(127,127,127,0.2));
+          background: rgba(127, 127, 127, 0.05);
+          color: var(--secondary-text-color, #64748b);
+          border-radius: 20px;
+          padding: 4px 12px;
+          font-size: 11px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        }
+        .diag-toggle-btn:hover {
+          background: rgba(127, 127, 127, 0.12);
+          color: var(--primary-text-color);
+        }
+        .diag-arrow {
+          font-size: 9px;
+          opacity: 0.7;
+        }
+        .diag-panel {
+          background: var(--secondary-background-color, rgba(127,127,127,0.06));
+          border: 1px solid var(--divider-color, rgba(127,127,127,0.18));
+          border-radius: 12px;
+          padding: 10px 12px;
+          margin-bottom: 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .diag-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+          gap: 8px;
+        }
+        .diag-card {
+          background: var(--card-background-color, rgba(255,255,255,0.03));
+          border: 1px solid var(--divider-color, rgba(127,127,127,0.14));
+          border-radius: 8px;
+          padding: 8px 10px;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .diag-card-title {
+          font-size: 11px;
+          font-weight: 600;
+          color: var(--secondary-text-color, #94a3b8);
+        }
+        .diag-card-val {
+          font-size: 15px;
+          font-weight: 700;
+          color: var(--primary-text-color);
+        }
+        .diag-card-sub {
+          font-size: 10px;
+          color: var(--secondary-text-color, #64748b);
+        }
+        .diag-outdoor-box {
+          border-top: 1px dashed var(--divider-color, rgba(127,127,127,0.2));
+          padding-top: 8px;
+          margin-top: 2px;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+        .diag-outdoor-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          font-size: 12px;
+        }
+        .diag-outdoor-badge {
+          background: rgba(16, 185, 129, 0.15);
+          color: #10b981;
+          font-size: 10px;
+          font-weight: 700;
+          padding: 2px 7px;
+          border-radius: 6px;
+        }
+        .diag-outdoor-details {
+          font-size: 11px;
+          color: var(--secondary-text-color, #94a3b8);
+          display: flex;
+          flex-wrap: wrap;
+          gap: 4px 8px;
+        }
+        .diag-outdoor-hint {
+          font-size: 11px;
+          color: var(--secondary-text-color, #94a3b8);
+          font-style: italic;
+          padding: 4px 0;
         }
 
         .sched-divider {
@@ -958,6 +1060,66 @@ class HAThermostatSplitCard extends HTMLElement {
       `
           : ""
       }
+
+      <div class="diag-toggle-bar">
+        <button class="diag-toggle-btn" id="btn-toggle-diag">
+          <span>📊 Diagnostic & Efficacité</span>
+          <span class="diag-arrow">${this._showDiagnostics ? "▲" : "▼"}</span>
+        </button>
+      </div>
+
+      ${
+        this._showDiagnostics
+          ? `
+        <div class="diag-panel">
+          <div class="diag-grid">
+            <div class="diag-card">
+              <div class="diag-card-title">⏱️ Inertie apprise</div>
+              <div class="diag-card-val">${a.inertie_anticipee_min ?? 15} min</div>
+              <div class="diag-card-sub">Anticipation anti-yoyo</div>
+            </div>
+            <div class="diag-card">
+              <div class="diag-card-title">🌡️ Biais sonde split</div>
+              <div class="diag-card-val">+${formatTemp(a.biais_appris ?? 1.5)} °C</div>
+              <div class="diag-card-sub">Stratification plafond</div>
+            </div>
+            <div class="diag-card">
+              <div class="diag-card-title">📈 Cycles analysés</div>
+              <div class="diag-card-val">${a.cycles_appris ?? 0}</div>
+              <div class="diag-card-sub">Précision : ${a.dernier_overshoot_deg !== null && a.dernier_overshoot_deg !== undefined ? `${a.dernier_overshoot_deg > 0 ? "+" : ""}${formatTemp(a.dernier_overshoot_deg)} °C` : "—"}</div>
+            </div>
+            <div class="diag-card">
+              <div class="diag-card-title">💨 Vitesse chauffe</div>
+              <div class="diag-card-val">${a.vitesse_chauffe_deg_h !== undefined ? `${a.vitesse_chauffe_deg_h > 0 ? "+" : ""}${formatTemp(a.vitesse_chauffe_deg_h)} °C/h` : "0,0 °C/h"}</div>
+              <div class="diag-card-sub">${escapeHtml(a.statut_inverter || "Inverter actif")}</div>
+            </div>
+          </div>
+
+          ${
+            a.temperature_exterieure !== undefined && a.temperature_exterieure !== null
+              ? `
+            <div class="diag-outdoor-box">
+              <div class="diag-outdoor-header">
+                <span class="diag-outdoor-temp">❄️ Extérieur : <strong>${formatTemp(a.temperature_exterieure)} °C</strong></span>
+                <span class="diag-outdoor-badge">${escapeHtml(a.efficacite_thermique_label || "Calcul inertie...")}</span>
+              </div>
+              <div class="diag-outdoor-details">
+                ${a.constante_temps_tau_h ? `<span>Constante d'inertie : <strong>tau = ${formatTemp(a.constante_temps_tau_h)}h</strong></span>` : `<span>Constante d'inertie : <em>en cours d'apprentissage</em></span>`}
+                ${a.deperdition_deg_h_pour_10k ? `<span>• Déperdition : <strong>${formatTemp(a.deperdition_deg_h_pour_10k)} °C/h</strong> (pour 10° d'écart)</span>` : ""}
+                ${a.puissance_maintien_estimee_w ? `<span>• Puissance maintien : <strong>~${a.puissance_maintien_estimee_w} W</strong></span>` : ""}
+              </div>
+            </div>
+          `
+              : `
+            <div class="diag-outdoor-hint">
+              💡 <em>Astuce : configurez votre capteur extérieur dans l'intégration pour calculer l'inertie de la maison (tau) et l'anticipation météo.</em>
+            </div>
+          `
+          }
+        </div>
+      `
+          : ""
+      }
     `;
 
     root.querySelector("#btn-minus")?.addEventListener("click", () => this._stepTarget(-0.5));
@@ -967,6 +1129,10 @@ class HAThermostatSplitCard extends HTMLElement {
     });
     root.querySelector("[data-hvac='off']")?.addEventListener("click", () => this._turnOff());
     root.querySelector("#btn-resume-sched")?.addEventListener("click", () => this._clearOverride());
+    root.querySelector("#btn-toggle-diag")?.addEventListener("click", () => {
+      this._showDiagnostics = !this._showDiagnostics;
+      this._renderHeader();
+    });
   }
 
   _stepTarget(delta) {

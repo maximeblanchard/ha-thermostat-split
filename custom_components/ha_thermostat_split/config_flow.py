@@ -27,6 +27,7 @@ from .const import (
     CONF_MIN_TEMP,
     CONF_MODULATION_INTERVAL,
     CONF_NAME,
+    CONF_OUTDOOR_TEMP,
     CONF_POWER,
     CONF_POWER_THRESHOLD,
     CONF_RESYNC,
@@ -108,6 +109,11 @@ def _build_user_schema(cur: dict[str, Any], excluded_splits: list[str]) -> vol.S
             ): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
+            vol.Optional(
+                CONF_OUTDOOR_TEMP, description={"suggested_value": cur.get(CONF_OUTDOOR_TEMP)}
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+            ),
         }
     )
 
@@ -132,6 +138,11 @@ def _build_options_schema(cur: dict[str, Any], excluded_splits: list[str]) -> vo
             CONF_POWER, description={"suggested_value": cur.get(CONF_POWER)}
         ): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="sensor")
+        ),
+        vol.Optional(
+            CONF_OUTDOOR_TEMP, description={"suggested_value": cur.get(CONF_OUTDOOR_TEMP)}
+        ): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
         ),
         vol.Required(CONF_POWER_THRESHOLD, default=d[CONF_POWER_THRESHOLD]): _num(1, 500, 1, "W"),
         vol.Required(CONF_MIN_TEMP, default=d[CONF_MIN_TEMP]): _num(5, 25, 0.5, "°C"),

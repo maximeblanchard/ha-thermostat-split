@@ -50,6 +50,7 @@ from .const import (
     CONF_MIN_ON,
     CONF_MIN_TEMP,
     CONF_MODULATION_INTERVAL,
+    CONF_OUTDOOR_TEMP,
     CONF_POWER,
     CONF_POWER_THRESHOLD,
     CONF_RESYNC,
@@ -134,11 +135,13 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         )
         self._inverter_params = InverterParams(
             enabled=bool(cfg.get(CONF_INVERTER_MODE, True)),
-            min_offset=float(cfg.get(CONF_INVERTER_MIN_OFFSET, 1.5)),
-            max_offset=float(cfg.get(CONF_INVERTER_MAX_OFFSET, 3.0)),
+            min_offset=float(cfg.get(CONF_INVERTER_MIN_OFFSET, 0.5)),
+            max_offset=float(cfg.get(CONF_INVERTER_MAX_OFFSET, 2.0)),
             p_band=float(cfg.get(CONF_INVERTER_P_BAND, 1.5)),
             step=0.5,
         )
+        self._outdoor_sensor: str | None = cfg.get(CONF_OUTDOOR_TEMP)
+        self._outdoor_temp: float | None = None
         self._learning_enabled = bool(cfg.get(CONF_LEARNING_ENABLED, True))
         self._anti_spam = timedelta(seconds=float(cfg.get(CONF_ANTI_SPAM, 90.0)))
         self._modulation_interval = timedelta(
@@ -246,6 +249,11 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             "biais_appris": self._learner.learned_bias,
             "dernier_overshoot_deg": self._learner.last_overshoot,
             "cycles_appris": self._learner.cycle_count,
+            "temperature_exterieure": self._outdoor_temp,
+            "constante_temps_tau_h": self._learner.tau_h,
+            "deperdition_deg_h_pour_10k": self._learner.loss_rate_per_10k,
+            "efficacite_thermique_label": self._learner.thermal_efficiency_label,
+            "puissance_maintien_estimee_w": self._learner.estimated_heat_need_w(self._target),
             "anti_spam_secondes": self._anti_spam.total_seconds(),
             "intervalle_modulation_secondes": self._modulation_interval.total_seconds(),
             "compresseur_actif": tr.is_on if tr else None,
@@ -336,9 +344,12 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             if self._learning_enabled and self._temp is not None:
                 self._learner.start_cycle(self._target, self._temp)
 
+        watch_entities = list(self._sensors) + [self._split]
+        if self._outdoor_sensor:
+            watch_entities.append(self._outdoor_sensor)
         self.async_on_remove(
             async_track_state_change_event(
-                self.hass, self._sensors + [self._split], self._on_input_change
+                self.hass, watch_entities, self._on_input_change
             )
         )
         self.async_on_remove(
@@ -481,6 +492,20 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             "presets": dict(self._schedule.presets),
             "days": self._schedule.to_dict()["days"],
             "version": self._schedule_version,
+            "diagnostics": {
+                "outdoor_temp": self._outdoor_temp,
+                "anticipation_min": round(self._learner.anticipation_h * 60, 1),
+                "learned_bias": self._learner.learned_bias,
+                "last_overshoot": self._learner.last_overshoot,
+                "cycle_count": self._learner.cycle_count,
+                "slope": self._slope,
+                "tau_h": self._learner.tau_h,
+                "loss_rate_per_10k": self._learner.loss_rate_per_10k,
+                "efficiency_label": self._learner.thermal_efficiency_label,
+                "heat_need_w": self._learner.estimated_heat_need_w(self._target),
+                "inverter_status": self._inverter_mode_desc,
+                "offset": self._current_offset,
+            },
         }
 
     async def async_update_schedule(
@@ -608,6 +633,17 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         self._ignored = ignored
         return round(mean(values), 2) if values else None
 
+    def _compute_outdoor_temperature(self) -> float | None:
+        if not self._outdoor_sensor:
+            return None
+        st = self.hass.states.get(self._outdoor_sensor)
+        if st is None or st.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return None
+        try:
+            return round(float(st.state), 1)
+        except (ValueError, TypeError):
+            return None
+
     def _get_split_current_temp(self) -> float | None:
         split = self.hass.states.get(self._split)
         if split is not None:
@@ -623,12 +659,19 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             now = dt_util.utcnow()
             now_ts = now.timestamp()
             self._temp = self._compute_temperature(now)
+            self._outdoor_temp = self._compute_outdoor_temperature()
             self._adopt_split_state(now)
             await self._evaluate_and_apply_schedule_locked(now)
 
             if self._temp is not None:
-                if self._learner.add_sample(now_ts, self._temp, self._params.hot_tolerance):
-                    self._schedule_learner_save()
+                if self._learning_enabled:
+                    if self._demand:
+                        if self._learner.add_sample(now_ts, self._temp, self._params.hot_tolerance):
+                            self._schedule_learner_save()
+                    else:
+                        if self._learner.add_cooling_sample(now_ts, self._temp, self._outdoor_temp):
+                            self._schedule_learner_save()
+
                 self._slope = self._learner.compute_slope()
                 self._anticip_offset = (
                     self._learner.get_anticipation_offset(self._slope)
@@ -842,6 +885,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             learned_bias=self._learner.learned_bias,
             filtered_split_temp=self._learner.filtered_split_temp,
             cycle_elapsed_s=cycle_elapsed_s,
+            outdoor_temp=self._outdoor_temp,
             min_temp=min_temp,
             max_temp=max_temp,
         )
