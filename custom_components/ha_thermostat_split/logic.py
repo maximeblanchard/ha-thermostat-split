@@ -163,8 +163,9 @@ def compute_inverter_setpoint(
     raw_setpoint = ref_split_temp + offset
 
     # Plafonnement anti-emballement : en régime de croisière ou approche, la consigne envoyée
-    # ne doit pas s'envoler si l'air sous plafond chauffe alors que la pièce est déjà proche de la cible
-    cap_steady = target_temp + clamped_bias + offset
+    # ne doit pas s'envoler si l'air sous plafond chauffe, mais elle ne doit JAMAIS être
+    # inférieure à (ref_split_temp + min_offset), sinon le split coupe prématurément en thermo-off.
+    cap_steady = max(ref_split_temp + params.min_offset, target_temp + clamped_bias + offset)
     raw_setpoint = min(raw_setpoint, cap_steady)
 
     # 3. Démarrage doux progressif anti-pic (> 2 kW)
