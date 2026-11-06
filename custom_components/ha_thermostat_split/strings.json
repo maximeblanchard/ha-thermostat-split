@@ -8,10 +8,12 @@
           "name": "Room name",
           "split_entity": "Physical split (climate entity)",
           "temperature_sensors": "Room temperature sensors (automatic average)",
-          "power_sensor": "Heat pump power sensor"
+          "power_sensor": "Heat pump power sensor",
+          "outdoor_temperature_sensor": "Outdoor temperature sensor (optional)"
         },
         "data_description": {
-          "temperature_sensors": "Add your room temperature sensors one by one. The integration automatically computes the real-time average."
+          "temperature_sensors": "Add your room temperature sensors one by one. The integration automatically computes the real-time average.",
+          "outdoor_temperature_sensor": "Used for weather feed-forward anticipation and thermal efficiency calculation."
         }
       }
     },
@@ -30,6 +32,7 @@
           "split_entity": "Physical split (climate entity)",
           "temperature_sensors": "Room temperature sensors (automatic average)",
           "power_sensor": "Heat pump power sensor",
+          "outdoor_temperature_sensor": "Outdoor temperature sensor (optional)",
           "compressor_on_threshold": "Compressor on threshold",
           "min_temp": "Minimum target temperature",
           "max_temp": "Maximum target temperature",
@@ -52,7 +55,8 @@
           "resync_minutes": "Setpoint re-assertion interval"
         },
         "data_description": {
-          "temperature_sensors": "Add or remove room temperature sensors one by one."
+          "temperature_sensors": "Add or remove room temperature sensors one by one.",
+          "outdoor_temperature_sensor": "Used for weather feed-forward anticipation and thermal efficiency calculation."
         }
       }
     },

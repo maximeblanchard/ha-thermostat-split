@@ -139,7 +139,7 @@ class InverterModulation(unittest.TestCase):
         )
         self.assertEqual(sp, 22.0)
         self.assertEqual(offset, 2.0)
-        self.assertIn("forte puissance", desc)
+        self.assertIn("chauffe rapide", desc)
 
     def test_setpoint_never_below_room_target(self):
         # Si le split mesure anormalement froid (ex: 17°C) alors que la cible est 20°C
