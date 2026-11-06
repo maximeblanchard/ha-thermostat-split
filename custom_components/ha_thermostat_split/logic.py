@@ -28,11 +28,11 @@ class InverterParams:
     """Paramètres de consigne dynamique inverter."""
 
     enabled: bool = True
-    min_offset: float = 1.5
-    max_offset: float = 3.0
+    min_offset: float = 0.5
+    max_offset: float = 2.0
     p_band: float = 1.5
     step: float = 0.5
-    startup_grace_s: float = 300.0
+    startup_grace_s: float = 360.0
     soft_start_error: float = 1.0
     max_plausible_bias: float = 3.5
 
@@ -124,43 +124,53 @@ def compute_inverter_setpoint(
 
     # 1. Température de référence stabilisée du split
     clamped_bias = max(0.5, min(3.0, learned_bias))
-    if in_startup:
-        # Au démarrage, l'air chaud piégé sous le capot (23–28 °C) puis le brassage initial
-        # faussent la sonde interne : on s'ancre sur la température pièce + biais appris
-        ref_split_temp = room_temp + clamped_bias
-    else:
-        raw_clamped = min(
+    raw_clamped = min(
+        room_temp + params.max_plausible_bias,
+        max(room_temp - 0.5, split_temp),
+    )
+    if filtered_split_temp is not None:
+        filt_clamped = min(
             room_temp + params.max_plausible_bias,
-            max(room_temp - 0.5, split_temp),
+            max(room_temp - 0.5, filtered_split_temp),
         )
-        if filtered_split_temp is not None:
-            filt_clamped = min(
-                room_temp + params.max_plausible_bias,
-                max(room_temp - 0.5, filtered_split_temp),
-            )
-            # Ignore les micro-baisses (pas de 1 °C ou dégivrage) tout en couvrant une hausse réelle
-            ref_split_temp = max(filt_clamped, raw_clamped - 0.3)
-        else:
-            ref_split_temp = raw_clamped
+        # Ignore les micro-baisses (pas de 1 °C ou dégivrage) tout en couvrant une hausse réelle
+        ref_split_temp = max(filt_clamped, raw_clamped - 0.3)
+    else:
+        ref_split_temp = raw_clamped
 
-    # 2. Calcul de l'offset dynamique avec démarrage doux anti-pic (2,5 kW+)
+    # 2. Calcul de l'offset dynamique proportionnel
     p_band = max(0.1, params.p_band)
-    if in_startup and error <= params.soft_start_error:
-        offset = params.min_offset
-        mode = "démarrage doux (anti-pic)"
-    elif effective_error >= p_band:
+    if effective_error >= p_band:
         offset = params.max_offset
-        mode = "chauffe rapide (forte puissance)"
+        mode = "chauffe rapide"
     elif effective_error <= 0.0:
         offset = params.min_offset
-        mode = "maintien / modulation minimale"
+        mode = "maintien / modulation minimale (~500 W)"
     else:
         ratio = effective_error / p_band
         offset = params.min_offset + ratio * (params.max_offset - params.min_offset)
         mode = f"modulation inverter ({ratio * 100:.0f}%)"
 
     raw_setpoint = ref_split_temp + offset
+
+    # Plafonnement anti-emballement : en régime de croisière ou approche, la consigne envoyée
+    # ne doit pas s'envoler si l'air sous plafond chauffe alors que la pièce est déjà proche de la cible
+    cap_steady = target_temp + clamped_bias + offset
+    raw_setpoint = min(raw_setpoint, cap_steady)
+
+    # 3. Démarrage doux progressif anti-pic (> 2 kW)
     step = params.step if params.step > 0 else 0.5
+    if in_startup:
+        # Palier 1 (0 à 180s) : lancement ultra-doux à basse fréquence compresseur (~250-450 W)
+        # Palier 2 (180 à grace_s) : montée progressive sans dépasser l'allure moyenne (~600-900 W)
+        if cycle_elapsed_s < 180.0:
+            soft_cap = min(target_temp, round((room_temp + 0.8) / step) * step)
+            mode = "démarrage doux (anti-pic phase 1)"
+        else:
+            soft_cap = min(target_temp + 0.5, round((room_temp + 1.5) / step) * step)
+            mode = "démarrage doux (anti-pic phase 2)"
+        raw_setpoint = min(raw_setpoint, soft_cap)
+
     rounded = round(raw_setpoint / step) * step
 
     # En mode chauffe, la consigne envoyée ne doit jamais être inférieure à la cible de la pièce

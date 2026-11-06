@@ -1004,14 +1004,15 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
 
         urgent = self._user_target_changed or anti_idle_rescue
         if not urgent:
-            # Verrouillage pendant les 5 premières minutes : évite de baisser la consigne
-            # quand la turbine brasse l'air avant que la batterie chaude ne soit à température
+            # En démarrage doux progressif (phases 1 et 2), on autorise la montée douce de palier
+            # mais on filtre les petits bruits
             if (
                 cycle_elapsed_s is not None
                 and cycle_elapsed_s < self._inverter_params.startup_grace_s
             ):
-                return
-            if resync_due and abs(current - wanted) >= 0.5:
+                if abs(current - wanted) < (step - 0.05):
+                    return
+            elif resync_due and abs(current - wanted) >= 0.5:
                 # Réaffirmation périodique douce une fois resync_minutes écoulé
                 pass
             else:
@@ -1021,8 +1022,8 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
                     and now - self._last_command < self._modulation_interval
                 ):
                     return
-                # Zone morte de 1,0 °C pour éviter l'effet ping-pong de ±0,5 °C
-                if abs(current - wanted) < 1.0:
+                # Zone morte calquée sur le pas de consigne (0.5 °C) pour permettre la modulation basse puissance (~500 W)
+                if abs(current - wanted) < (step - 0.05):
                     return
         elif abs(current - wanted) < 0.4:
             self._user_target_changed = False

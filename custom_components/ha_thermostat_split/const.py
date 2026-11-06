@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "ha_thermostat_split"
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 
 CONF_NAME = "name"
 CONF_SPLIT = "split_entity"
@@ -48,8 +48,8 @@ DEFAULTS: dict = {
     CONF_ANTI_SPAM: 90.0,         # s : délai minimal entre START/STOP ou actions urgentes
     CONF_MODULATION_INTERVAL: 300.0,  # s : délai minimal (5 min) entre deux ajustements de consigne inverter
     CONF_INVERTER_MODE: True,     # Modulation continue de la consigne split (inverter)
-    CONF_INVERTER_MIN_OFFSET: 1.5,  # °C au-dessus de la sonde split en maintien (évite les coupures sur sonde à 1 °C près)
-    CONF_INVERTER_MAX_OFFSET: 3.0,  # °C au-dessus de la sonde split en chauffe rapide
+    CONF_INVERTER_MIN_OFFSET: 0.5,  # °C au-dessus de la sonde split en maintien (point de fonctionnement optimal ~500 W)
+    CONF_INVERTER_MAX_OFFSET: 2.0,  # °C au-dessus de la sonde split en chauffe rapide (évite les pics > 2 kW)
     CONF_INVERTER_P_BAND: 1.5,    # °C de bande proportionnelle pour l'offset inverter
     CONF_LEARNING_ENABLED: True,  # Apprentissage auto de l'inertie et du biais anti-yoyo
 }

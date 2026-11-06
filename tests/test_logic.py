@@ -109,10 +109,11 @@ class InverterModulation(unittest.TestCase):
     def setUp(self):
         self.params = InverterParams(
             enabled=True,
-            min_offset=1.5,
-            max_offset=3.0,
+            min_offset=0.5,
+            max_offset=2.0,
             p_band=1.5,
             step=0.5,
+            startup_grace_s=360.0,
         )
 
     def test_fallback_when_split_temp_none(self):
@@ -128,16 +129,16 @@ class InverterModulation(unittest.TestCase):
 
     def test_fast_heating_when_far_below(self):
         # Temp pièce = 18.0, Cible = 20.0 (erreur 2.0 >= p_band 1.5)
-        # Split mesure 21.0 -> setpoint = 21.0 + 3.0 = 24.0
+        # Split mesure 20.0 -> offset = max_offset (2.0) -> setpoint = 22.0
         sp, offset, desc = compute_inverter_setpoint(
             room_temp=18.0,
             target_temp=20.0,
-            split_temp=21.0,
+            split_temp=20.0,
             fallback_setpoint=24.0,
             params=self.params,
         )
-        self.assertEqual(sp, 24.0)
-        self.assertEqual(offset, 3.0)
+        self.assertEqual(sp, 22.0)
+        self.assertEqual(offset, 2.0)
         self.assertIn("forte puissance", desc)
 
     def test_setpoint_never_below_room_target(self):
@@ -154,8 +155,7 @@ class InverterModulation(unittest.TestCase):
 
     def test_minimum_modulation_prevents_integer_idle(self):
         # Temp pièce = 20.0, Cible = 20.0 (erreur 0.0)
-        # Split mesure 21.0 (sonde entière) -> setpoint = 21.0 + 1.5 = 22.5
-        # Même si la sonde passe à 22 °C, 22 < 22.5 : aucun passage en idle !
+        # Split mesure 21.0 -> setpoint = 21.0 + 0.5 = 21.5 (sweet-spot 500 W prouvé empiriquement)
         sp, offset, desc = compute_inverter_setpoint(
             room_temp=20.0,
             target_temp=20.0,
@@ -163,39 +163,39 @@ class InverterModulation(unittest.TestCase):
             fallback_setpoint=24.0,
             params=self.params,
         )
-        self.assertEqual(sp, 22.5)
-        self.assertEqual(offset, 1.5)
+        self.assertEqual(sp, 21.5)
+        self.assertEqual(offset, 0.5)
         self.assertIn("modulation minimale", desc)
 
-    def test_startup_ignores_trapped_hood_heat(self):
-        # Scénario réel CSV (17h47) : pièce à 19.0 °C (cible 19.5 °C), mais capot split à 27.0 °C !
-        # Au démarrage (cycle_elapsed_s=0), on ne doit PAS envoyer 28.5 °C mais ~22.0 °C (19.0 + 1.5 + 1.5)
+    def test_startup_phase_1_ultra_soft(self):
+        # Scénario réel CSV : pièce à 18.2 °C (cible 19.0 °C), capot split avec chaleur piégée à 26.0 °C
+        # Au démarrage (cycle_elapsed_s=0), on ne doit PAS envoyer 22.5 °C (qui déclenchait le pic à 2,8 kW)
+        # mais la cible douce 19.0 °C pour un démarrage compresseur en douceur (~300 W)
         sp, offset, desc = compute_inverter_setpoint(
-            room_temp=19.0,
-            target_temp=19.5,
-            split_temp=27.0,
+            room_temp=18.2,
+            target_temp=19.0,
+            split_temp=26.0,
             fallback_setpoint=24.0,
             params=self.params,
-            learned_bias=1.5,
+            learned_bias=1.8,
             cycle_elapsed_s=0.0,
         )
-        self.assertEqual(sp, 22.0)
-        self.assertEqual(offset, 1.5)
-        self.assertIn("démarrage doux", desc)
+        self.assertEqual(sp, 19.0)
+        self.assertIn("anti-pic phase 1", desc)
 
-    def test_startup_ignores_cold_coil_flush_at_minute_3(self):
-        # Scénario réel CSV (07h46) : à t=180s, la turbine chasse l'air froid (split_temp tombe à 19 °C)
-        # La consigne doit rester ancrée à 22.0 °C et ne surtout pas plonger à 20.0/20.5 °C !
-        sp, offset, _ = compute_inverter_setpoint(
-            room_temp=19.0,
-            target_temp=19.5,
+    def test_startup_phase_2_progressive_ramp(self):
+        # À t=200s (phase 2), l'échangeur est tiédi, on autorise une montée progressive
+        sp, offset, desc = compute_inverter_setpoint(
+            room_temp=18.3,
+            target_temp=19.0,
             split_temp=19.0,
             fallback_setpoint=24.0,
             params=self.params,
-            learned_bias=1.5,
-            cycle_elapsed_s=180.0,
+            learned_bias=1.8,
+            cycle_elapsed_s=200.0,
         )
-        self.assertEqual(sp, 22.0)
+        self.assertEqual(sp, 19.5)
+        self.assertIn("anti-pic phase 2", desc)
 
     def test_anticipation_shifts_modulation(self):
         # Temp pièce = 19.8, Cible = 20.0. Erreur = 0.2
@@ -204,12 +204,13 @@ class InverterModulation(unittest.TestCase):
         sp, offset, desc = compute_inverter_setpoint(
             room_temp=19.8,
             target_temp=20.0,
-            split_temp=22.0,
+            split_temp=21.0,
             fallback_setpoint=24.0,
             params=self.params,
             anticipation_offset=0.3,
         )
-        self.assertEqual(offset, 1.5)
+        self.assertEqual(offset, 0.5)
+        self.assertEqual(sp, 21.5)
         self.assertIn("modulation minimale", desc)
 
 
