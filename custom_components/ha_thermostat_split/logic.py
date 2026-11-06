@@ -172,14 +172,18 @@ def compute_inverter_setpoint(
     if in_startup:
         # En phase de démarrage, l'objectif est d'empêcher le compresseur de s'emballer
         # à pleine puissance (> 2 kW). On maintient un delta (consigne - sonde split)
-        # strictement maîtrisé :
-        # - Palier 1 (0 à 180s) : delta = +0.5 °C (démarrage à 200-400 W)
-        # - Palier 2 (180 à grace_s) : delta = +1.0 °C (montée douce à 600-800 W)
+        # strictement maîtrisé par rapport à la température RÉELLE mesurée par le split
+        # et plafonné par rapport à la cible de la pièce :
+        # - Palier 1 (0 à 180s) : consigne bridée à min(cible, sonde_split + 0.5 °C)
+        # - Palier 2 (180 à grace_s) : consigne bridée à min(cible + 0.5, sonde_split + 1.0 °C)
+        split_ref = split_temp if split_temp is not None else room_temp
         if cycle_elapsed_s < 180.0:
-            soft_sp = round((ref_split_temp + 0.5) / step) * step
+            soft_cap = min(target_temp, split_ref + 0.5)
+            soft_sp = round(soft_cap / step) * step
             mode = "démarrage très doux (anti-pic phase 1)"
         else:
-            soft_sp = round((ref_split_temp + 1.0) / step) * step
+            soft_cap = min(target_temp + 0.5, split_ref + 1.0)
+            soft_sp = round(soft_cap / step) * step
             mode = "montée progressive (anti-pic phase 2)"
         raw_setpoint = min(raw_setpoint, soft_sp)
 

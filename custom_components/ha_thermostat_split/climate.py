@@ -1016,16 +1016,20 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         hvac_action = split.attributes.get("hvac_action")
 
         # Relance anti-idle : après brassage initial (>= 4 min), si le split s'est mis en veille
-        # ou n'a pas démarré car sa sonde interne a rattrapé la consigne envoyée
+        # ou n'a pas démarré car sa sonde interne a rattrapé la consigne envoyée.
+        # Si un capteur de puissance est configuré, c'est lui qui fait foi :
+        # si la PAC consomme (> 45 W), le compresseur tourne et n'est PAS en veille !
         anti_idle_rescue = False
+        is_really_idle = (
+            not self._tracker.is_on
+            if self._tracker is not None
+            else (hvac_action == HVACAction.IDLE)
+        )
         if (
             cycle_elapsed_s is not None
             and cycle_elapsed_s >= 240.0
             and raw_split_temp is not None
-            and (
-                hvac_action == HVACAction.IDLE
-                or (self._tracker is not None and not self._tracker.is_on)
-            )
+            and is_really_idle
             and current < raw_split_temp + 1.0
         ):
             try:
