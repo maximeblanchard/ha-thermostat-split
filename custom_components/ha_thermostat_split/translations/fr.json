@@ -8,10 +8,12 @@
           "name": "Nom de la pièce",
           "split_entity": "Split physique (entité climate)",
           "temperature_sensors": "Capteurs de température de la pièce (moyenne automatique)",
-          "power_sensor": "Capteur de puissance de la PAC"
+          "power_sensor": "Capteur de puissance de la PAC",
+          "outdoor_temperature_sensor": "Capteur de température extérieure (optionnel)"
         },
         "data_description": {
-          "temperature_sensors": "Ajoutez vos capteurs de température un par un. L'intégration calcule automatiquement la moyenne en temps réel."
+          "temperature_sensors": "Ajoutez vos capteurs de température un par un. L'intégration calcule automatiquement la moyenne en temps réel.",
+          "outdoor_temperature_sensor": "Utilisé pour la régulation météo anticipée et le calcul de l'efficacité thermique de la maison."
         }
       }
     },
@@ -30,6 +32,7 @@
           "split_entity": "Split physique (entité climate)",
           "temperature_sensors": "Capteurs de température de la pièce (moyenne automatique)",
           "power_sensor": "Capteur de puissance de la PAC",
+          "outdoor_temperature_sensor": "Capteur de température extérieure (optionnel)",
           "compressor_on_threshold": "Seuil compresseur en marche",
           "min_temp": "Température minimale réglable",
           "max_temp": "Température maximale réglable",
@@ -52,7 +55,8 @@
           "resync_minutes": "Réaffirmation de la consigne"
         },
         "data_description": {
-          "temperature_sensors": "Ajoutez ou retirez des capteurs de température un par un."
+          "temperature_sensors": "Ajoutez ou retirez des capteurs de température un par un.",
+          "outdoor_temperature_sensor": "Utilisé pour la régulation météo anticipée et le calcul de l'efficacité thermique de la maison."
         }
       }
     },

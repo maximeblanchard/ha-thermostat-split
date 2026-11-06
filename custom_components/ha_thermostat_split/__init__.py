@@ -11,7 +11,13 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CONF_INVERTER_MIN_OFFSET, CONF_MAX_OVERSHOOT, DOMAIN, VERSION
+from .const import (
+    CONF_INVERTER_MAX_OFFSET,
+    CONF_INVERTER_MIN_OFFSET,
+    CONF_MAX_OVERSHOOT,
+    DOMAIN,
+    VERSION,
+)
 from .websocket import async_register_websocket
 
 _LOGGER = logging.getLogger(__name__)
@@ -134,6 +140,21 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         )
         _LOGGER.info(
             "Migration de l'entrée %s vers v2 appliquée (offset_min=1.5 °C, max_overshoot=1.2 °C)",
+            config_entry.title,
+        )
+    if config_entry.version < 3:
+        new_data = {**config_entry.data}
+        new_options = {**config_entry.options}
+        for store in (new_data, new_options):
+            if store.get(CONF_INVERTER_MIN_OFFSET) == 1.5:
+                store[CONF_INVERTER_MIN_OFFSET] = 0.5
+            if store.get(CONF_INVERTER_MAX_OFFSET) == 3.0:
+                store[CONF_INVERTER_MAX_OFFSET] = 2.0
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, options=new_options, version=3
+        )
+        _LOGGER.info(
+            "Migration de l'entrée %s vers v3 appliquée (offset_min=0.5 °C, offset_max=2.0 °C)",
             config_entry.title,
         )
     return True
