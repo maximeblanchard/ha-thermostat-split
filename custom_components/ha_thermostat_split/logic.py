@@ -170,21 +170,27 @@ def compute_inverter_setpoint(
     # 3. Démarrage doux progressif anti-pic (> 2 kW)
     step = params.step if params.step > 0 else 0.5
     if in_startup:
-        # Palier 1 (0 à 180s) : lancement ultra-doux à basse fréquence compresseur (~250-450 W)
-        # Palier 2 (180 à grace_s) : montée progressive sans dépasser l'allure moyenne (~600-900 W)
+        # En phase de démarrage, l'objectif est d'empêcher le compresseur de s'emballer
+        # à pleine puissance (> 2 kW). On maintient un delta (consigne - sonde split)
+        # strictement maîtrisé :
+        # - Palier 1 (0 à 180s) : delta = +0.5 °C (démarrage à 200-400 W)
+        # - Palier 2 (180 à grace_s) : delta = +1.0 °C (montée douce à 600-800 W)
         if cycle_elapsed_s < 180.0:
-            soft_cap = min(target_temp, round((room_temp + 0.8) / step) * step)
-            mode = "démarrage doux (anti-pic phase 1)"
+            soft_sp = round((ref_split_temp + 0.5) / step) * step
+            mode = "démarrage très doux (anti-pic phase 1)"
         else:
-            soft_cap = min(target_temp + 0.5, round((room_temp + 1.5) / step) * step)
-            mode = "démarrage doux (anti-pic phase 2)"
-        raw_setpoint = min(raw_setpoint, soft_cap)
+            soft_sp = round((ref_split_temp + 1.0) / step) * step
+            mode = "montée progressive (anti-pic phase 2)"
+        raw_setpoint = min(raw_setpoint, soft_sp)
 
     rounded = round(raw_setpoint / step) * step
 
-    # En mode chauffe, la consigne envoyée ne doit jamais être inférieure à la cible de la pièce
-    # pour éviter que le split ne coupe en croyant devoir refroidir
-    final = min(max_temp, max(min_temp, max(target_temp, rounded)))
+    # En mode chauffe établi (après démarrage doux), la consigne envoyée ne doit pas
+    # être inférieure à la cible de la pièce pour éviter un passage intempestif en veille
+    if in_startup:
+        final = min(max_temp, max(min_temp, rounded))
+    else:
+        final = min(max_temp, max(min_temp, max(target_temp, rounded)))
 
     return (round(final, 1), round(offset, 2), mode)
 
