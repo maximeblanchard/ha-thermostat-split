@@ -24,6 +24,7 @@ class CompressorTracker:
         self.power_entity = power_entity
         self.threshold_w = threshold_w
         self.is_on = False
+        self.power_w: float | None = None
         self.since: datetime | None = None
         self.refs = 0
         self._cycle_start: datetime | None = None
@@ -37,6 +38,7 @@ class CompressorTracker:
     def async_start(self) -> None:
         w = self._to_watts(self.hass.states.get(self.power_entity))
         if w is not None:
+            self.power_w = round(w, 1)
             self.is_on = w > self.threshold_w
             now = dt_util.utcnow()
             self.since = now
@@ -70,6 +72,7 @@ class CompressorTracker:
         watts = self._to_watts(event.data.get("new_state"))
         if watts is None:
             return  # on garde l'état précédent
+        self.power_w = round(watts, 1)
         on = watts > self.threshold_w
         if on == self.is_on:
             return
@@ -93,6 +96,7 @@ class CompressorTracker:
         watts = self._to_watts(self.hass.states.get(self.power_entity))
         if watts is None:
             return
+        self.power_w = round(watts, 1)
         on = watts > self.threshold_w
         if on != self.is_on:
             now = dt_util.utcnow()

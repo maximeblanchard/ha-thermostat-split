@@ -218,6 +218,12 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
     def hvac_action(self) -> HVACAction:
         if self._hvac_mode == HVACMode.OFF:
             return HVACAction.OFF
+        if self._tracker is not None:
+            return (
+                HVACAction.HEATING
+                if (self._demand and self._tracker.is_on)
+                else HVACAction.IDLE
+            )
         return HVACAction.HEATING if self._demand else HVACAction.IDLE
 
     @property
@@ -254,6 +260,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             "deperdition_deg_h_pour_10k": self._learner.loss_rate_per_10k,
             "efficacite_thermique_label": self._learner.thermal_efficiency_label,
             "puissance_maintien_estimee_w": self._learner.estimated_heat_need_w(self._target),
+            "puissance_pac_w": tr.power_w if tr else None,
             "anti_spam_secondes": self._anti_spam.total_seconds(),
             "intervalle_modulation_secondes": self._modulation_interval.total_seconds(),
             "compresseur_actif": tr.is_on if tr else None,
@@ -653,6 +660,14 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
                 pass
         return None
 
+    def _compressor_elapsed_s(self, now: datetime) -> float | None:
+        """Durée réelle de fonctionnement du compresseur basée sur la puissance PAC."""
+        if self._tracker is not None:
+            return self._tracker.age_s(now) if self._tracker.is_on else 0.0
+        if self._cycle_started_at is not None:
+            return max(0.0, (now - self._cycle_started_at).total_seconds())
+        return None
+
     # ------------------------------------------------------------------ boucle de régulation
     async def _async_control(self) -> None:
         async with self._lock:
@@ -679,11 +694,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
                     else 0.0
                 )
                 if self._demand:
-                    cycle_elapsed_s = (
-                        max(0.0, (now - self._cycle_started_at).total_seconds())
-                        if self._cycle_started_at is not None
-                        else None
-                    )
+                    cycle_elapsed_s = self._compressor_elapsed_s(now)
                     self._learner.update_split_temp(
                         self._get_split_current_temp(),
                         self._temp,
@@ -859,10 +870,8 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         if self._temp is None:
             return min(max_temp, max(min_temp, self._split_setpoint))
 
-        if cycle_elapsed_s is None and self._cycle_started_at is not None:
-            cycle_elapsed_s = max(
-                0.0, (dt_util.utcnow() - self._cycle_started_at).total_seconds()
-            )
+        if cycle_elapsed_s is None:
+            cycle_elapsed_s = self._compressor_elapsed_s(dt_util.utcnow())
 
         inverter_params = InverterParams(
             enabled=self._inverter_params.enabled,
@@ -875,6 +884,11 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             max_plausible_bias=self._inverter_params.max_plausible_bias,
         )
 
+        comp_power_w = (
+            self._tracker.power_w
+            if (self._tracker is not None and self._tracker.is_on)
+            else None
+        )
         setpoint, offset, mode_desc = compute_inverter_setpoint(
             room_temp=self._temp,
             target_temp=self._target,
@@ -886,6 +900,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             filtered_split_temp=self._learner.filtered_split_temp,
             cycle_elapsed_s=cycle_elapsed_s,
             outdoor_temp=self._outdoor_temp,
+            compressor_power_w=comp_power_w,
             min_temp=min_temp,
             max_temp=max_temp,
         )
@@ -984,17 +999,20 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         """Ajuste la consigne modulante vers le split et réaffirme périodiquement l'état."""
         if not self._demand:
             return
-        if self._last_command is not None and now - self._last_command < self._anti_spam:
-            return
+        if self._last_command is not None:
+            min_gap = timedelta(seconds=5) if self._user_target_changed else timedelta(seconds=25)
+            if now - self._last_command < min_gap:
+                return
 
         split = self.hass.states.get(self._split)
         if split is None or split.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return
 
-        cycle_elapsed_s = (
+        cycle_elapsed_s = self._compressor_elapsed_s(now)
+        demand_elapsed_s = (
             max(0.0, (now - self._cycle_started_at).total_seconds())
             if self._cycle_started_at is not None
-            else None
+            else 0.0
         )
         resync_due = self._last_command is None or (now - self._last_command >= self._resync)
 
@@ -1011,47 +1029,61 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         except (TypeError, ValueError):
             return
 
+        try:
+            max_temp = float(split.attributes.get("max_temp", 30.0))
+            step = float(split.attributes.get("target_temperature_step", 0.5)) or 0.5
+        except (TypeError, ValueError):
+            max_temp, step = 30.0, 0.5
+
         wanted = self._split_setpoint_to_send(cycle_elapsed_s=cycle_elapsed_s)
         raw_split_temp = self._get_split_current_temp()
-        hvac_action = split.attributes.get("hvac_action")
+        comp_on = bool(self._tracker and self._tracker.is_on)
+        power_w = self._tracker.power_w if self._tracker is not None else None
 
-        # Relance anti-idle : après brassage initial (>= 4 min), si le split s'est mis en veille
-        # ou n'a pas démarré car sa sonde interne a rattrapé la consigne envoyée.
-        # Si un capteur de puissance est configuré, c'est lui qui fait foi :
-        # si la PAC consomme (> 45 W), le compresseur tourne et n'est PAS en veille !
+        # 1. Protection immédiate anti-thermo-off (même quand le compresseur tourne !) :
+        # Si la sonde interne du split monte et rattrape la consigne envoyée (current < split_temp + 0.5),
+        # on relève la consigne sans attendre les 5 min de modulation pour éviter la coupure compresseur.
+        anti_thermo_off = False
+        if raw_split_temp is not None and current < raw_split_temp + 0.5:
+            safe_floor = round(
+                min(raw_split_temp + max(0.5, self._inverter_params.min_offset), 28.0) / step
+            ) * step
+            if safe_floor < raw_split_temp + 0.5 and raw_split_temp + 0.5 <= max_temp:
+                safe_floor = round((raw_split_temp + 0.5) / step) * step
+            wanted = min(max_temp, max(wanted, round(safe_floor, 1)))
+            if wanted > current:
+                anti_thermo_off = True
+
+        # 2. Relance anti-idle basée uniquement sur la puissance PAC :
+        # Si après 3 min de demande le compresseur ne consomme toujours pas (< seuil W)
+        # et que l'écart à la sonde interne est < 1.0 °C, on pousse la consigne.
         anti_idle_rescue = False
-        is_really_idle = (
-            not self._tracker.is_on
-            if self._tracker is not None
-            else (hvac_action == HVACAction.IDLE)
-        )
         if (
-            cycle_elapsed_s is not None
-            and cycle_elapsed_s >= 240.0
+            not comp_on
+            and demand_elapsed_s >= 180.0
             and raw_split_temp is not None
-            and is_really_idle
             and current < raw_split_temp + 1.0
         ):
-            try:
-                max_temp = float(split.attributes.get("max_temp", 30.0))
-                step = float(split.attributes.get("target_temperature_step", 0.5)) or 0.5
-            except (TypeError, ValueError):
-                max_temp, step = 30.0, 0.5
-            rescue_sp = round((raw_split_temp + self._inverter_params.min_offset) / step) * step
-            if self._tracker is not None and self._tracker.is_on and self._temp is not None:
-                cap = (
-                    self._temp
-                    + self._inverter_params.max_plausible_bias
-                    + self._inverter_params.max_offset
-                )
-                rescue_sp = min(rescue_sp, round(cap / step) * step)
-            else:
-                rescue_sp = min(rescue_sp, 28.0)
+            rescue_sp = round(
+                min(raw_split_temp + max(1.0, self._inverter_params.min_offset), 28.0) / step
+            ) * step
             wanted = min(max_temp, max(wanted, round(rescue_sp, 1)))
-            anti_idle_rescue = True
+            if wanted > current:
+                anti_idle_rescue = True
 
-        urgent = self._user_target_changed or anti_idle_rescue
+        # 3. Verrouillage anti-baisse : tant que la pièce est à >= 0.4 °C sous la cible
+        # et que la puissance PAC reste modérée (< 900 W), on n'abaisse jamais la consigne split.
+        if (
+            self._temp is not None
+            and (self._target - self._temp) >= 0.4
+            and (power_w is None or power_w < 900.0)
+        ):
+            wanted = max(wanted, current)
+
+        urgent = self._user_target_changed or anti_thermo_off or anti_idle_rescue
         if not urgent:
+            if self._last_command is not None and now - self._last_command < self._anti_spam:
+                return
             # En démarrage doux progressif (phases 1 et 2), on autorise la montée douce de palier
             # mais on filtre les petits bruits
             if (
@@ -1081,9 +1113,14 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             self._last_setpoint_sent = wanted
             self._last_command = now
             self._user_target_changed = False
+            reason_label = (
+                "maintien anti-coupure"
+                if anti_thermo_off
+                else ("relance puissance PAC" if anti_idle_rescue else self._inverter_mode_desc)
+            )
             _LOGGER.debug(
                 "%s : consigne modulée ajustée à %.1f °C (%s)",
                 self.entity_id,
                 wanted,
-                "relance anti-idle" if anti_idle_rescue else self._inverter_mode_desc,
+                reason_label,
             )

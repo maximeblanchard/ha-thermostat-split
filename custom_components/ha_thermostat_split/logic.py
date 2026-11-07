@@ -108,6 +108,7 @@ def compute_inverter_setpoint(
     filtered_split_temp: float | None = None,
     cycle_elapsed_s: float | None = None,
     outdoor_temp: float | None = None,
+    compressor_power_w: float | None = None,
     min_temp: float = 15.0,
     max_temp: float = 30.0,
 ) -> tuple[float, float, str]:
@@ -120,7 +121,15 @@ def compute_inverter_setpoint(
         return (round(clamped_fallback, 1), 0.0, "consigne fixe de repli")
 
     error = target_temp - room_temp
-    effective_error = error - anticipation_offset
+    # L'anticipation d'inertie ne doit freiner qu'à l'approche de la cible (< 0.6 °C),
+    # jamais quand la pièce est encore loin sous la consigne (ex: passage planning matin).
+    if error >= 0.6:
+        effective_anticipation = 0.0
+    elif error > 0.3:
+        effective_anticipation = anticipation_offset * ((0.6 - error) / 0.3)
+    else:
+        effective_anticipation = anticipation_offset
+    effective_error = error - effective_anticipation
     in_startup = cycle_elapsed_s is not None and cycle_elapsed_s < params.startup_grace_s
 
     # 1. Température de référence stabilisée du split
@@ -134,12 +143,12 @@ def compute_inverter_setpoint(
             room_temp + params.max_plausible_bias,
             max(room_temp - 0.5, filtered_split_temp),
         )
-        # Ignore les micro-baisses (pas de 1 °C ou dégivrage) tout en couvrant une hausse réelle
-        ref_split_temp = max(filt_clamped, raw_clamped - 0.3)
+        # Ignore les micro-baisses (pas de 1 °C ou dégivrage) tout en couvrant immédiatement toute hausse réelle
+        ref_split_temp = max(filt_clamped, raw_clamped)
     else:
         ref_split_temp = raw_clamped
 
-    # 2. Calcul de l'offset dynamique proportionnel avec feed-forward météo
+    # 2. Calcul de l'offset dynamique proportionnel avec feed-forward météo et retour de puissance PAC
     weather_offset = 0.0
     if outdoor_temp is not None:
         if outdoor_temp < 8.0:
@@ -148,7 +157,19 @@ def compute_inverter_setpoint(
             weather_offset = -0.2
 
     p_band = max(0.1, params.p_band)
-    if effective_error >= p_band:
+    low_power_sluggish = (
+        not in_startup
+        and compressor_power_w is not None
+        and 45.0 < compressor_power_w < 650.0
+        and error >= 0.5
+    )
+    if low_power_sluggish:
+        # Le compresseur tourne au ralenti (< 650 W) alors que la pièce est >= 0.5 °C sous la cible :
+        # on force un offset franc pour sortir l'inverter de son palier basse fréquence (~435 W).
+        boost = 0.5 if error >= 0.7 else 0.0
+        offset = min(2.5, params.max_offset + boost)
+        mode = f"relance puissance ({compressor_power_w:.0f} W)"
+    elif effective_error >= p_band:
         offset = params.max_offset
         mode = "chauffe rapide"
     elif effective_error <= 0.0:
@@ -176,7 +197,7 @@ def compute_inverter_setpoint(
         # pour éviter que le split ne coupe prématurément en thermo-off (cycles courts).
         # - Palier 1 (0 à 180s) : consigne bridée à sonde_split + 0.5 °C
         # - Palier 2 (180 à grace_s) : consigne bridée à sonde_split + 1.0 °C
-        split_ref = split_temp if split_temp is not None else (room_temp + clamped_bias)
+        split_ref = raw_clamped
         if cycle_elapsed_s < 180.0:
             soft_sp = round((split_ref + 0.5) / step) * step
             mode = "démarrage très doux (anti-pic phase 1)"
@@ -186,6 +207,16 @@ def compute_inverter_setpoint(
         raw_setpoint = min(raw_setpoint, soft_sp)
 
     rounded = round(raw_setpoint / step) * step
+
+    # Plancher anti-thermo-off strict : la consigne arrondie doit rester au moins à +0.5 °C
+    # au-dessus de la sonde du split bornée (sinon consigne == sonde_split => coupure compresseur)
+    min_floor_offset = max(0.5, params.min_offset)
+    if not in_startup and error >= 0.4:
+        min_floor_offset = max(min_floor_offset, 1.0)
+    floor_sp = round((raw_clamped + min_floor_offset) / step) * step
+    if floor_sp < raw_clamped + 0.45:
+        floor_sp += step
+    rounded = max(rounded, floor_sp)
 
     # En mode chauffe, la consigne envoyée ne doit pas être inférieure à la cible de la pièce
     # pour éviter qu'elle ne coupe prématurément

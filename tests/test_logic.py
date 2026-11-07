@@ -195,8 +195,39 @@ class InverterModulation(unittest.TestCase):
             learned_bias=1.8,
             cycle_elapsed_s=200.0,
         )
-        self.assertEqual(sp, 19.5)
+        self.assertEqual(sp, 20.0)
         self.assertIn("anti-pic phase 2", desc)
+
+    def test_low_power_wakeup_boost(self):
+        # Passage planning à 19.5°C alors que la pièce est à 18.4°C (erreur = 1.1°C)
+        # et que le compresseur stagne au palier mini (~435 W) depuis > 10 min :
+        # doit envoyer un boost franc (+2.0°C -> 22.0°C) et ignorer l'anticipation parasites
+        sp, offset, desc = compute_inverter_setpoint(
+            room_temp=18.4,
+            target_temp=19.5,
+            split_temp=20.0,
+            fallback_setpoint=24.0,
+            params=self.params,
+            anticipation_offset=0.4,
+            cycle_elapsed_s=3600.0,
+            compressor_power_w=435.0,
+        )
+        self.assertGreaterEqual(sp, 22.0)
+        self.assertIn("relance puissance", desc)
+
+    def test_strict_anti_thermo_off_floor(self):
+        # Même si filtered_split_temp retarde (20.2°C) alors que split_temp vient de monter à 21.0°C,
+        # la consigne arrondie ne doit JAMAIS tomber à <= 21.0°C (évite le thermo-off immédiat)
+        sp, offset, desc = compute_inverter_setpoint(
+            room_temp=18.9,
+            target_temp=19.0,
+            split_temp=21.0,
+            filtered_split_temp=20.2,
+            fallback_setpoint=24.0,
+            params=self.params,
+            cycle_elapsed_s=900.0,
+        )
+        self.assertGreaterEqual(sp, 21.5)
 
     def test_anticipation_shifts_modulation(self):
         # Temp pièce = 19.8, Cible = 20.0. Erreur = 0.2
