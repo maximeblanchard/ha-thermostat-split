@@ -134,17 +134,25 @@ def compute_inverter_setpoint(
 
     # 1. Température de référence stabilisée du split
     clamped_bias = max(0.5, min(3.0, learned_bias))
+    # Au démarrage (< 180s), le capot contient souvent une poche d'air chaud résiduel (23-26 °C) :
+    # on borne plus strictement la sonde brute avant que le ventilateur n'ait brassé l'air.
+    if cycle_elapsed_s is not None and cycle_elapsed_s < 180.0:
+        effective_max_bias = min(params.max_plausible_bias, max(1.5, clamped_bias + 0.5))
+    else:
+        effective_max_bias = params.max_plausible_bias
+
     raw_clamped = min(
-        room_temp + params.max_plausible_bias,
+        room_temp + effective_max_bias,
         max(room_temp - 0.5, split_temp),
     )
     if filtered_split_temp is not None:
         filt_clamped = min(
-            room_temp + params.max_plausible_bias,
+            room_temp + effective_max_bias,
             max(room_temp - 0.5, filtered_split_temp),
         )
-        # Ignore les micro-baisses (pas de 1 °C ou dégivrage) tout en couvrant immédiatement toute hausse réelle
-        ref_split_temp = max(filt_clamped, raw_clamped)
+        # Ignore les micro-baisses (pas de 1 °C) sans jamais garder une mémoire haute > +0.4/+1.0 °C
+        max_filter_hold = 0.4 if effective_error <= 0.1 else 1.0
+        ref_split_temp = min(max(filt_clamped, raw_clamped), raw_clamped + max_filter_hold)
     else:
         ref_split_temp = raw_clamped
 
@@ -163,12 +171,22 @@ def compute_inverter_setpoint(
         and 45.0 < compressor_power_w < 650.0
         and error >= 0.5
     )
+    high_power_approaching = (
+        compressor_power_w is not None
+        and compressor_power_w >= 1000.0
+        and error <= 0.35
+    )
     if low_power_sluggish:
         # Le compresseur tourne au ralenti (< 650 W) alors que la pièce est >= 0.5 °C sous la cible :
         # on force un offset franc pour sortir l'inverter de son palier basse fréquence (~435 W).
         boost = 0.5 if error >= 0.7 else 0.0
         offset = min(2.5, params.max_offset + boost)
         mode = f"relance puissance ({compressor_power_w:.0f} W)"
+    elif high_power_approaching:
+        # La PAC pousse encore fort (>= 1000 W) alors qu'on approche de la cible (<= 0.35 °C) :
+        # on réduit immédiatement l'offset au minimum pour freiner l'inertie et éviter tout yoyo.
+        offset = max(0.2, params.min_offset + weather_offset)
+        mode = f"freinage anti-dépassement ({compressor_power_w:.0f} W)"
     elif effective_error >= p_band:
         offset = params.max_offset
         mode = "chauffe rapide"
@@ -211,7 +229,7 @@ def compute_inverter_setpoint(
     # Plancher anti-thermo-off strict : la consigne arrondie doit rester au moins à +0.5 °C
     # au-dessus de la sonde du split bornée (sinon consigne == sonde_split => coupure compresseur)
     min_floor_offset = max(0.5, params.min_offset)
-    if not in_startup and error >= 0.4:
+    if not in_startup and error >= 0.4 and not high_power_approaching:
         min_floor_offset = max(min_floor_offset, 1.0)
     floor_sp = round((raw_clamped + min_floor_offset) / step) * step
     if floor_sp < raw_clamped + 0.45:

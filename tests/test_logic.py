@@ -229,6 +229,22 @@ class InverterModulation(unittest.TestCase):
         )
         self.assertGreaterEqual(sp, 21.5)
 
+    def test_high_power_approaching_braking(self):
+        # Si la PAC pousse encore fort (>= 1000 W) alors qu'on approche à <= 0.35°C de la cible,
+        # on réduit immédiatement l'offset à +0.5°C pour éviter le dépassement (+0.6°C)
+        sp, offset, desc = compute_inverter_setpoint(
+            room_temp=19.2,
+            target_temp=19.5,
+            split_temp=21.0,
+            filtered_split_temp=22.5,
+            fallback_setpoint=24.0,
+            params=self.params,
+            cycle_elapsed_s=500.0,
+            compressor_power_w=1300.0,
+        )
+        self.assertEqual(sp, 21.5)
+        self.assertIn("freinage anti-dépassement", desc)
+
     def test_anticipation_shifts_modulation(self):
         # Temp pièce = 19.8, Cible = 20.0. Erreur = 0.2
         # Mais avec anticipation_offset = 0.3 -> erreur effective = -0.1 <= 0

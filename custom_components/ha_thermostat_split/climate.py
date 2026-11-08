@@ -1040,16 +1040,30 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         comp_on = bool(self._tracker and self._tracker.is_on)
         power_w = self._tracker.power_w if self._tracker is not None else None
 
-        # 1. Protection immédiate anti-thermo-off (même quand le compresseur tourne !) :
+        clamped_split_temp = raw_split_temp
+        if raw_split_temp is not None and self._temp is not None:
+            if demand_elapsed_s < 180.0 or (cycle_elapsed_s is not None and cycle_elapsed_s < 180.0):
+                bias_cap = min(
+                    self._inverter_params.max_plausible_bias,
+                    max(1.5, self._learner.learned_bias + 0.5),
+                )
+            else:
+                bias_cap = self._inverter_params.max_plausible_bias
+            clamped_split_temp = min(
+                self._temp + bias_cap,
+                max(self._temp - 0.5, raw_split_temp),
+            )
+
+        # 1. Protection immédiate anti-thermo-off (sur sonde bornée pour ignorer la chaleur piégée au démarrage) :
         # Si la sonde interne du split monte et rattrape la consigne envoyée (current < split_temp + 0.5),
         # on relève la consigne sans attendre les 5 min de modulation pour éviter la coupure compresseur.
         anti_thermo_off = False
-        if raw_split_temp is not None and current < raw_split_temp + 0.5:
+        if clamped_split_temp is not None and current < clamped_split_temp + 0.5:
             safe_floor = round(
-                min(raw_split_temp + max(0.5, self._inverter_params.min_offset), 28.0) / step
+                min(clamped_split_temp + max(0.5, self._inverter_params.min_offset), 28.0) / step
             ) * step
-            if safe_floor < raw_split_temp + 0.5 and raw_split_temp + 0.5 <= max_temp:
-                safe_floor = round((raw_split_temp + 0.5) / step) * step
+            if safe_floor < clamped_split_temp + 0.5 and clamped_split_temp + 0.5 <= max_temp:
+                safe_floor = round((clamped_split_temp + 0.5) / step) * step
             wanted = min(max_temp, max(wanted, round(safe_floor, 1)))
             if wanted > current:
                 anti_thermo_off = True
@@ -1071,24 +1085,46 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             if wanted > current:
                 anti_idle_rescue = True
 
-        # 3. Verrouillage anti-baisse : tant que la pièce est à >= 0.4 °C sous la cible
-        # et que la puissance PAC reste modérée (< 900 W), on n'abaisse jamais la consigne split.
+        # 3. Verrouillage anti-baisse uniquement en croisière basse puissance (< 600 W) hors démarrage :
+        # Empêche un micro-cran de -0.5 °C quand la pièce est encore froide et que la PAC stagne au ralenti,
+        # sans jamais bloquer la baisse rapide quand le capot ventilé refroidit (current - wanted >= 1.0).
         if (
-            self._temp is not None
-            and (self._target - self._temp) >= 0.4
-            and (power_w is None or power_w < 900.0)
+            cycle_elapsed_s is not None
+            and cycle_elapsed_s >= self._inverter_params.startup_grace_s
+            and self._temp is not None
+            and (self._target - self._temp) >= 0.5
+            and power_w is not None
+            and 45.0 < power_w < 600.0
+            and (current - wanted) <= 0.5
         ):
             wanted = max(wanted, current)
 
-        urgent = self._user_target_changed or anti_thermo_off or anti_idle_rescue
+        # 4. Baisse rapide anti-pic quand le capot chaud vient d'être purgé par le ventilateur
+        # ou quand la PAC pousse fort à l'approche de la consigne (écart >= 1.0 °C vers le bas).
+        fast_step_down = (current - wanted) >= 1.0
+        brake_near_target = (
+            wanted < current
+            and self._temp is not None
+            and self._temp >= (self._target - 0.15)
+        )
+
+        urgent = (
+            self._user_target_changed
+            or anti_thermo_off
+            or anti_idle_rescue
+            or fast_step_down
+        )
         if not urgent:
             if self._last_command is not None and now - self._last_command < self._anti_spam:
                 return
-            # En démarrage doux progressif (phases 1 et 2), on autorise la montée douce de palier
-            # mais on filtre les petits bruits
+            # En démarrage doux progressif ou en freinage à l'approche de la cible,
+            # on applique dès l'anti-spam (90 s) sans attendre les 5 min de modulation lente
             if (
-                cycle_elapsed_s is not None
-                and cycle_elapsed_s < self._inverter_params.startup_grace_s
+                (
+                    cycle_elapsed_s is not None
+                    and cycle_elapsed_s < self._inverter_params.startup_grace_s
+                )
+                or brake_near_target
             ):
                 if abs(current - wanted) < (step - 0.05):
                     return
@@ -1116,7 +1152,11 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             reason_label = (
                 "maintien anti-coupure"
                 if anti_thermo_off
-                else ("relance puissance PAC" if anti_idle_rescue else self._inverter_mode_desc)
+                else (
+                    "relance puissance PAC"
+                    if anti_idle_rescue
+                    else ("baisse rapide anti-pic" if fast_step_down else self._inverter_mode_desc)
+                )
             )
             _LOGGER.debug(
                 "%s : consigne modulée ajustée à %.1f °C (%s)",
