@@ -82,6 +82,8 @@ def decide(
         )
 
     # la pièce chauffe
+    if not compressor_on and temp >= target:
+        return Decision(STOP, "annulation démarrage : cible déjà atteinte sans compresseur")
     if temp < target + params.hot_tolerance:
         return Decision(HOLD, "chauffe en cours")
     if others_active or not compressor_on:

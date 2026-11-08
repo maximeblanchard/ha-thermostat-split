@@ -98,6 +98,18 @@ class Heating(unittest.TestCase):
             STOP,
         )
 
+    def test_abort_false_start_when_target_reached_before_compressor_runs(self):
+        # Si la demande est active mais que le compresseur n'a pas encore démarré
+        # et que la température est déjà à la cible (ex: retour de capteurs réveillés après le boot),
+        # on annule immédiatement la chauffe sans attendre le compresseur
+        dec = d(heating=True, compressor_on=False, compressor_age_s=10, temp=20.0, target=20.0)
+        self.assertEqual(dec.action, STOP)
+        self.assertIn("annulation démarrage", dec.reason)
+
+        # Si par contre la température est sous la cible, on maintient la mise en route
+        dec_cold = d(heating=True, compressor_on=False, compressor_age_s=10, temp=19.8, target=20.0)
+        self.assertEqual(dec_cold.action, HOLD)
+
     def test_unknown_age_is_old(self):
         self.assertEqual(
             d(heating=True, compressor_on=True, compressor_age_s=None, temp=20.4).action,

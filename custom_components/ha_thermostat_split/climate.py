@@ -87,6 +87,8 @@ _LOGGER = logging.getLogger(__name__)
 
 CONTROL_INTERVAL = timedelta(seconds=30)
 ADOPT_GRACE = timedelta(seconds=180)
+STARTUP_GRACE_S = 120.0
+STARTUP_STABILIZE_IDLE_S = 45.0
 
 
 def compute_room_temperature(
@@ -197,6 +199,8 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         self._used: list[str] = []
         self._ignored: dict[str, str] = {}
         self._reason = "initialisation"
+        self._boot_time: datetime = dt_util.utcnow()
+        self._was_idle_at_boot: bool = False
         self._invalid_since: datetime | None = None
         self._last_command: datetime | None = None
         self._last_setpoint_sent: float | None = None
@@ -330,6 +334,11 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             old_preset = old.attributes.get("preset_mode")
             if isinstance(old_preset, str) and old_preset in ALL_PRESETS:
                 restored_preset = old_preset
+            old_action = old.attributes.get("hvac_action")
+            self._was_idle_at_boot = (
+                old.state == HVACMode.OFF
+                or old_action in (HVACAction.IDLE, HVACAction.OFF, None)
+            )
 
         self._schedule_store = Store(
             self.hass, 1, f"{DOMAIN}_schedule_{self._entry.entry_id}"
@@ -752,6 +761,26 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
                 self.async_write_ha_state()
                 return
             self._invalid_since = None
+
+            # Protection démarrage de Home Assistant :
+            # Si le split est éteint et qu'on est dans la période post-démarrage (120 s) :
+            # 1. Si tous les capteurs configurés ne sont pas encore prêts, refuser tout démarrage intempestif.
+            # 2. Si le thermostat était inactif (idle/off) avant le redémarrage, attendre au moins 45 s
+            #    que le maillage radio/réseau (Zigbee, BLE, Netatmo) ait transmis ses mesures stabilisées.
+            boot_elapsed_s = (now - self._boot_time).total_seconds()
+            if not self._demand and boot_elapsed_s < STARTUP_GRACE_S:
+                if len(self._sensors) > 1 and len(self._used) < len(self._sensors):
+                    self._reason = (
+                        f"stabilisation des capteurs au démarrage ({len(self._used)}/{len(self._sensors)} prêts)"
+                    )
+                    self.async_write_ha_state()
+                    return
+                if self._was_idle_at_boot and boot_elapsed_s < STARTUP_STABILIZE_IDLE_S:
+                    self._reason = (
+                        f"stabilisation au démarrage ({round(STARTUP_STABILIZE_IDLE_S - boot_elapsed_s)} s restantes)"
+                    )
+                    self.async_write_ha_state()
+                    return
 
             tracker = self._tracker
             decision = decide(
