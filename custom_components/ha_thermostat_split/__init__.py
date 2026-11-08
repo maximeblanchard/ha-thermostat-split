@@ -21,7 +21,7 @@ from .const import (
 from .websocket import async_register_websocket
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = [Platform.CLIMATE]
+PLATFORMS = [Platform.CLIMATE, Platform.SENSOR]
 
 STATIC_URL_BASE = f"/{DOMAIN}_static"
 CARD_FILENAME = "ha-thermostat-split-card.js"

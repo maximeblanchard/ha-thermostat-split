@@ -300,9 +300,9 @@ class InverterModulation(unittest.TestCase):
         learner.add_cooling_sample(900.0, 19.5, 5.0)
         learner.add_cooling_sample(1800.0, 19.45, 5.0)
         learner.add_cooling_sample(2700.0, 19.40, 5.0)
-        learner.add_cooling_sample(3600.0, 19.35, 5.0)
-        ok = learner.add_cooling_sample(4500.0, 19.30, 5.0)
-        self.assertTrue(ok)
+        ok1 = learner.add_cooling_sample(3600.0, 19.35, 5.0)
+        ok2 = learner.add_cooling_sample(4800.0, 19.30, 5.0)
+        self.assertTrue(ok1 and ok2)
         self.assertIsNotNone(learner.tau_h)
         self.assertGreater(learner.tau_h, 30.0)  # Bonne ou excellente inertie
         self.assertIn("tau =", learner.thermal_efficiency_label)

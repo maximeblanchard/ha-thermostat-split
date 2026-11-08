@@ -141,6 +141,12 @@ def compute_inverter_setpoint(
     else:
         effective_max_bias = params.max_plausible_bias
 
+    high_power_approaching = (
+        compressor_power_w is not None
+        and compressor_power_w >= 1000.0
+        and error <= 0.35
+    )
+
     raw_clamped = min(
         room_temp + effective_max_bias,
         max(room_temp - 0.5, split_temp),
@@ -151,7 +157,13 @@ def compute_inverter_setpoint(
             max(room_temp - 0.5, filtered_split_temp),
         )
         # Ignore les micro-baisses (pas de 1 °C) sans jamais garder une mémoire haute > +0.4/+1.0 °C
-        max_filter_hold = 0.4 if effective_error <= 0.1 else 1.0
+        # En freinage haute puissance à l'approche de la cible, aucun maintien haut n'est appliqué
+        if high_power_approaching:
+            max_filter_hold = 0.0
+        elif effective_error <= 0.1:
+            max_filter_hold = 0.4
+        else:
+            max_filter_hold = 1.0
         ref_split_temp = min(max(filt_clamped, raw_clamped), raw_clamped + max_filter_hold)
     else:
         ref_split_temp = raw_clamped
@@ -170,11 +182,6 @@ def compute_inverter_setpoint(
         and compressor_power_w is not None
         and 45.0 < compressor_power_w < 650.0
         and error >= 0.5
-    )
-    high_power_approaching = (
-        compressor_power_w is not None
-        and compressor_power_w >= 1000.0
-        and error <= 0.35
     )
     if low_power_sluggish:
         # Le compresseur tourne au ralenti (< 650 W) alors que la pièce est >= 0.5 °C sous la cible :
@@ -299,8 +306,17 @@ class AntiYoyoLearner:
         self, now_s: float, room_temp: float, outdoor_temp: float | None
     ) -> bool:
         """Enregistre un échantillon hors-chauffe pour quantifier la déperdition thermique."""
+        changed = False
+        if self._in_cycle and self._waiting_post_peak and self._heating_stopped_at is not None:
+            if self._cycle_peak_temp is None or room_temp > self._cycle_peak_temp:
+                self._cycle_peak_temp = room_temp
+            elapsed = now_s - self._heating_stopped_at
+            if elapsed >= 900.0 or room_temp <= (self._cycle_peak_temp - 0.15):
+                self._finalize_cycle(0.3)
+                changed = True
+
         if outdoor_temp is None:
-            return False
+            return changed
         self.outdoor_temp = outdoor_temp
         # Si le chauffage est arrêté depuis au moins 15 min (inertie immédiate de surface dissipée)
         if not self._in_cycle and self._heating_stopped_at is not None:
@@ -310,8 +326,9 @@ class AntiYoyoLearner:
                     self._last_cooling_eval_s is None
                     or now_s - self._last_cooling_eval_s >= 1200.0
                 ):
-                    return self._evaluate_thermal_efficiency(now_s)
-        return False
+                    if self._evaluate_thermal_efficiency(now_s):
+                        changed = True
+        return changed
 
     def _evaluate_thermal_efficiency(self, now_s: float) -> bool:
         """Calcule la constante d'inertie tau (en heures) et le taux de déperdition spécifique."""
@@ -458,9 +475,10 @@ class AntiYoyoLearner:
         """Indique que la chauffe active s'est arrêtée, active l'observation du pic d'inertie."""
         self.filtered_split_temp = None
         self._last_split_filter_s = None
+        self.history_cooling.clear()
+        self._heating_stopped_at = now_s
         if self._in_cycle and not self._waiting_post_peak:
             self._waiting_post_peak = True
-            self._heating_stopped_at = now_s
 
     def _finalize_cycle(self, hot_tolerance: float) -> None:
         """Calcule le dépassement final et ajuste l'anticipation."""
@@ -481,7 +499,6 @@ class AntiYoyoLearner:
         self.anticipation_h = round(self.anticipation_h, 3)
         self._in_cycle = False
         self._waiting_post_peak = False
-        self._heating_stopped_at = None
         self._cycle_peak_temp = None
         self._cycle_target = None
 

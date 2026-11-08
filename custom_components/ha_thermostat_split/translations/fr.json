@@ -85,6 +85,11 @@
           }
         }
       }
+    },
+    "sensor": {
+      "room_temperature": {
+        "name": "Température moyenne"
+      }
     }
   }
 }

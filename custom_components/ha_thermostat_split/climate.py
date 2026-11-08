@@ -89,6 +89,37 @@ CONTROL_INTERVAL = timedelta(seconds=30)
 ADOPT_GRACE = timedelta(seconds=180)
 
 
+def compute_room_temperature(
+    hass: HomeAssistant,
+    sensors: list[str],
+    sensor_max_age_min: float,
+    now: datetime,
+) -> tuple[float | None, list[str], dict[str, str]]:
+    """Calcule la température moyenne de la pièce à partir des capteurs configurés."""
+    values: list[float] = []
+    used: list[str] = []
+    ignored: dict[str, str] = {}
+    for entity_id in sensors:
+        st = hass.states.get(entity_id)
+        if st is None or st.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            ignored[entity_id] = "indisponible"
+            continue
+        try:
+            val = float(st.state)
+        except ValueError:
+            ignored[entity_id] = "valeur invalide"
+            continue
+        ref = getattr(st, "last_reported", None) or st.last_updated
+        age_min = (now - ref).total_seconds() / 60
+        if age_min > sensor_max_age_min:
+            ignored[entity_id] = f"trop ancien ({age_min:.0f} min)"
+            continue
+        values.append(val)
+        used.append(entity_id)
+    avg_temp = round(mean(values), 2) if values else None
+    return avg_temp, used, ignored
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -616,29 +647,21 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
 
     # ------------------------------------------------------------------ température
     def _compute_temperature(self, now: datetime) -> float | None:
-        values: list[float] = []
-        used: list[str] = []
-        ignored: dict[str, str] = {}
-        for entity_id in self._sensors:
-            st = self.hass.states.get(entity_id)
-            if st is None or st.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                ignored[entity_id] = "indisponible"
-                continue
-            try:
-                val = float(st.state)
-            except ValueError:
-                ignored[entity_id] = "valeur invalide"
-                continue
-            ref = getattr(st, "last_reported", None) or st.last_updated
-            age_min = (now - ref).total_seconds() / 60
-            if age_min > self._sensor_max_age:
-                ignored[entity_id] = f"trop ancien ({age_min:.0f} min)"
-                continue
-            values.append(val)
-            used.append(entity_id)
-        self._used = used
-        self._ignored = ignored
-        return round(mean(values), 2) if values else None
+        avg_temp, self._used, self._ignored = compute_room_temperature(
+            self.hass, self._sensors, self._sensor_max_age, now
+        )
+        self._notify_temp_listeners(avg_temp)
+        return avg_temp
+
+    @callback
+    def _notify_temp_listeners(self, temp: float | None) -> None:
+        callbacks = (
+            self.hass.data.get(DOMAIN, {})
+            .get("temp_callbacks", {})
+            .get(self._entry.entry_id, [])
+        )
+        for cb in list(callbacks):
+            cb(temp, list(self._used), dict(self._ignored))
 
     def _compute_outdoor_temperature(self) -> float | None:
         if not self._outdoor_sensor:
