@@ -1137,7 +1137,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             if wanted > current:
                 anti_idle_rescue = True
 
-        # 3. Verrouillage anti-baisse uniquement en croisière basse puissance (< 600 W) hors démarrage :
+        # 3. Verrouillage anti-baisse uniquement en croisière basse puissance (< 650 W) hors démarrage :
         # Empêche un micro-cran de -0.5 °C quand la pièce est encore froide et que la PAC stagne au ralenti,
         # sans jamais bloquer la baisse rapide quand le capot ventilé refroidit (current - wanted >= 1.0).
         if (
@@ -1146,7 +1146,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             and self._temp is not None
             and (self._target - self._temp) >= 0.5
             and power_w is not None
-            and 45.0 < power_w < 600.0
+            and 45.0 < power_w < 650.0
             and (current - wanted) <= 0.5
         ):
             wanted = max(wanted, current)
@@ -1160,11 +1160,25 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             and self._temp >= (self._target - 0.15)
         )
 
+        # 5. Relance puissance immédiate si la PAC est bloquée au ralenti (< 650 W)
+        # alors que la pièce est en demande (écart >= 0.5 °C).
+        power_boost_needed = (
+            cycle_elapsed_s is not None
+            and cycle_elapsed_s >= self._inverter_params.startup_grace_s
+            and comp_on
+            and power_w is not None
+            and 45.0 < power_w < 650.0
+            and self._temp is not None
+            and (self._target - self._temp) >= 0.5
+            and (wanted - current) >= (step - 0.05)
+        )
+
         urgent = (
             self._user_target_changed
             or anti_thermo_off
             or anti_idle_rescue
             or fast_step_down
+            or power_boost_needed
         )
         if not urgent:
             if self._last_command is not None and now - self._last_command < self._anti_spam:
@@ -1206,7 +1220,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
                 if anti_thermo_off
                 else (
                     "relance puissance PAC"
-                    if anti_idle_rescue
+                    if (anti_idle_rescue or power_boost_needed)
                     else ("baisse rapide anti-pic" if fast_step_down else self._inverter_mode_desc)
                 )
             )

@@ -227,6 +227,46 @@ class InverterModulation(unittest.TestCase):
         self.assertGreaterEqual(sp, 22.0)
         self.assertIn("relance puissance", desc)
 
+    def test_low_power_morning_step_boost_with_integer_step(self):
+        # Cas réel utilisateur : split avec pas entier (step=1.0), offset max configuré à 3.0°C.
+        # Passage nuit (18.5°C) -> matin (19.5°C) alors que la PAC tournait à 450 W.
+        # La consigne envoyée doit sauter de 21°C à 24°C pour sortir l'inverter du seuil plancher 450 W.
+        params3 = InverterParams(
+            enabled=True,
+            min_offset=0.5,
+            max_offset=3.0,
+            p_band=1.5,
+            step=1.0,
+            startup_grace_s=360.0,
+            soft_start_error=1.2,
+            max_plausible_bias=3.0,
+        )
+        # Nuit : consigne envoyée = 21.0°C
+        sp_night, _, _ = compute_inverter_setpoint(
+            room_temp=18.5,
+            target_temp=18.5,
+            split_temp=20.3,
+            fallback_setpoint=20.0,
+            params=params3,
+            cycle_elapsed_s=7200.0,
+            compressor_power_w=450.0,
+        )
+        self.assertEqual(sp_night, 21.0)
+
+        # Matin : consigne boostée à 24.0°C (+3.0°C au split, delta sonde interne +3.7°C)
+        sp_morn, offset, desc = compute_inverter_setpoint(
+            room_temp=18.5,
+            target_temp=19.5,
+            split_temp=20.3,
+            fallback_setpoint=20.0,
+            params=params3,
+            cycle_elapsed_s=7300.0,
+            compressor_power_w=450.0,
+        )
+        self.assertEqual(sp_morn, 24.0)
+        self.assertGreaterEqual(offset, 3.5)
+        self.assertIn("relance puissance", desc)
+
     def test_strict_anti_thermo_off_floor(self):
         # Même si filtered_split_temp retarde (20.2°C) alors que split_temp vient de monter à 21.0°C,
         # la consigne arrondie ne doit JAMAIS tomber à <= 21.0°C (évite le thermo-off immédiat)

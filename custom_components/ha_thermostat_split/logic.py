@@ -188,8 +188,14 @@ def compute_inverter_setpoint(
     if low_power_sluggish:
         # Le compresseur tourne au ralenti (< 650 W) alors que la pièce est >= 0.5 °C sous la cible :
         # on force un offset franc pour sortir l'inverter de son palier basse fréquence (~435 W).
-        boost = 0.5 if error >= 0.7 else 0.0
-        offset = min(2.5, params.max_offset + boost)
+        if error >= 0.8:
+            boost = 1.0
+        elif error >= 0.6:
+            boost = 0.5
+        else:
+            boost = 0.3
+        base_max = max(params.max_offset, 2.0)
+        offset = min(base_max + boost, max(4.0, params.max_offset + 1.0))
         mode = f"relance puissance ({compressor_power_w:.0f} W)"
     elif high_power_approaching:
         # La PAC pousse encore fort (>= 1000 W) alors qu'on approche de la cible (<= 0.35 °C) :
@@ -238,8 +244,15 @@ def compute_inverter_setpoint(
     # Plancher anti-thermo-off strict : la consigne arrondie doit rester au moins à +0.5 °C
     # au-dessus de la sonde du split bornée (sinon consigne == sonde_split => coupure compresseur)
     min_floor_offset = max(0.5, params.min_offset)
-    if not in_startup and error >= 0.4 and not high_power_approaching:
-        min_floor_offset = max(min_floor_offset, 1.0)
+    if not in_startup and not high_power_approaching:
+        if low_power_sluggish:
+            min_floor_offset = max(min_floor_offset, 2.5 if step >= 1.0 else 2.0)
+            if error >= 0.8:
+                min_floor_offset = max(min_floor_offset, 3.2 if step >= 1.0 else 2.5)
+        elif error >= 0.7:
+            min_floor_offset = max(min_floor_offset, 2.2 if step >= 1.0 else 1.5)
+        elif error >= 0.4:
+            min_floor_offset = max(min_floor_offset, 1.2 if step >= 1.0 else 1.0)
     floor_sp = round((raw_clamped + min_floor_offset) / step) * step
     if floor_sp < raw_clamped + 0.45:
         floor_sp += step
