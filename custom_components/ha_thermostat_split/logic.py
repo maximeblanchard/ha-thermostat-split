@@ -229,14 +229,20 @@ def compute_inverter_setpoint(
         # tout en assurant une consigne toujours supérieure à la sonde du split (+0.5 °C)
         # pour éviter que le split ne coupe prématurément en thermo-off (cycles courts).
         # - Palier 1 (0 à 180s) : consigne bridée à sonde_split + 0.5 °C
-        # - Palier 2 (180 à grace_s) : consigne bridée à sonde_split + 1.0 °C
+        # - Palier 2 (180 à grace_s) : consigne bridée à sonde_split + 1.2 °C
+        # Si la pièce a un écart significatif (error >= 0.4 °C), la consigne ne doit pas être
+        # inférieure à (target_temp + min_offset) pour éviter que la bouffée de chaleur initiale
+        # ne fasse monter la sonde sous plafond au-dessus de la consigne (thermo-off à 6 min par temps doux).
         split_ref = raw_clamped
         if cycle_elapsed_s < 180.0:
             soft_sp = round((split_ref + 0.5) / step) * step
             mode = "démarrage très doux (anti-pic phase 1)"
         else:
-            soft_sp = round((split_ref + 1.0) / step) * step
+            soft_sp = round((split_ref + 1.2) / step) * step
             mode = "montée progressive (anti-pic phase 2)"
+        if error >= 0.4:
+            target_floor = round((target_temp + (1.2 if step >= 1.0 else 0.8)) / step) * step
+            soft_sp = max(soft_sp, target_floor)
         raw_setpoint = min(raw_setpoint, soft_sp)
 
     rounded = round(raw_setpoint / step) * step
@@ -256,6 +262,14 @@ def compute_inverter_setpoint(
     floor_sp = round((raw_clamped + min_floor_offset) / step) * step
     if floor_sp < raw_clamped + 0.45:
         floor_sp += step
+
+    # En demande de chauffe (error >= 0.4 °C), la consigne envoyée ne doit jamais être
+    # bridée trop bas sous plafond, sinon la bouffée de chaleur du démarrage coupe le compresseur
+    # en thermo-off au bout de 6 minutes par temps doux (>= 10 °C ext).
+    if error >= 0.4 and not high_power_approaching:
+        target_floor = round((target_temp + (1.2 if step >= 1.0 else 0.8)) / step) * step
+        floor_sp = max(floor_sp, target_floor)
+
     rounded = max(rounded, floor_sp)
 
     # En mode chauffe, la consigne envoyée ne doit pas être inférieure à la cible de la pièce

@@ -267,6 +267,34 @@ class InverterModulation(unittest.TestCase):
         self.assertGreaterEqual(offset, 3.5)
         self.assertIn("relance puissance", desc)
 
+    def test_startup_target_floor_prevents_mild_weather_thermo_off(self):
+        # Cas réel utilisateur par temps doux (11°C à 15°C ext) :
+        # Démarrage le matin à 07:45 : pièce à 18.1°C, cible 19.5°C, sonde split froide à 17.0°C.
+        # En phase de démarrage doux (t=60s), la consigne envoyée ne doit PAS être bridée à 19.5°C
+        # sinon la bouffée de chaleur initiale (2.5 kW) fait monter le capot à 20°C et coupe en thermo-off (cycle de 6 min).
+        # La consigne doit être au moins à 21.0°C pour laisser le compresseur passer son pic sans couper.
+        params_int = InverterParams(
+            enabled=True,
+            min_offset=0.5,
+            max_offset=3.0,
+            p_band=1.5,
+            step=1.0,
+            startup_grace_s=360.0,
+            soft_start_error=1.2,
+            max_plausible_bias=3.0,
+        )
+        sp, offset, desc = compute_inverter_setpoint(
+            room_temp=18.1,
+            target_temp=19.5,
+            split_temp=17.0,
+            fallback_setpoint=20.0,
+            params=params_int,
+            cycle_elapsed_s=60.0,
+            compressor_power_w=800.0,
+        )
+        self.assertGreaterEqual(sp, 21.0)
+        self.assertIn("anti-pic", desc)
+
     def test_strict_anti_thermo_off_floor(self):
         # Même si filtered_split_temp retarde (20.2°C) alors que split_temp vient de monter à 21.0°C,
         # la consigne arrondie ne doit JAMAIS tomber à <= 21.0°C (évite le thermo-off immédiat)
