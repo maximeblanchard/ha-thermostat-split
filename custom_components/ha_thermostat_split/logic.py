@@ -111,6 +111,7 @@ def compute_inverter_setpoint(
     cycle_elapsed_s: float | None = None,
     outdoor_temp: float | None = None,
     compressor_power_w: float | None = None,
+    last_setpoint: float | None = None,
     min_temp: float = 15.0,
     max_temp: float = 30.0,
 ) -> tuple[float, float, str]:
@@ -234,6 +235,12 @@ def compute_inverter_setpoint(
         raw_setpoint = min(raw_setpoint, soft_sp)
 
     rounded = round(raw_setpoint / step) * step
+    if (
+        last_setpoint is not None
+        and not in_startup
+        and abs(raw_setpoint - last_setpoint) < 0.65 * step
+    ):
+        rounded = round(last_setpoint / step) * step
 
     # Plancher anti-thermo-off strict : la consigne arrondie doit rester suffisamment
     # au-dessus de la sonde du split bornée (capteur souvent au pas entier de 1 °C)

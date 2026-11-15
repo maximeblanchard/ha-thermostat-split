@@ -446,6 +446,34 @@ class InverterModulation(unittest.TestCase):
         new_learner.load_data(saved)
         self.assertEqual(new_learner.tau_h, learner.tau_h)
 
+    def test_setpoint_rounding_hysteresis_prevents_boundary_chatter(self):
+        # Scénario 15/11 14h29-16h56 : raw_setpoint oscille autour de 22.75 °C (entre 22.73 et 22.77 °C)
+        # Sans hystérésis, la consigne bascule entre 22.5 et 23.0 toutes les 5 minutes.
+        # Avec last_setpoint, elle reste verrouillée tant que l'écart à last_setpoint < 0.65 * step (0.325 °C).
+        sp_stay_23, _, _ = compute_inverter_setpoint(
+            room_temp=19.26,
+            target_temp=19.5,
+            split_temp=22.0,
+            fallback_setpoint=24.0,
+            params=self.params,
+            learned_bias=2.5,
+            cycle_elapsed_s=1800.0,
+            last_setpoint=23.0,
+        )
+        self.assertEqual(sp_stay_23, 23.0)
+
+        sp_stay_22_5, _, _ = compute_inverter_setpoint(
+            room_temp=19.24,
+            target_temp=19.5,
+            split_temp=22.0,
+            fallback_setpoint=24.0,
+            params=self.params,
+            learned_bias=2.5,
+            cycle_elapsed_s=1800.0,
+            last_setpoint=22.5,
+        )
+        self.assertEqual(sp_stay_22_5, 22.5)
+
 
 class AntiYoyoLearning(unittest.TestCase):
     def test_slope_and_anticipation(self):

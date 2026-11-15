@@ -953,6 +953,11 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             if (self._tracker is not None and self._tracker.is_on)
             else None
         )
+        active_last_sp = (
+            self._last_setpoint_sent
+            if (self._demand and (cycle_elapsed_s is None or cycle_elapsed_s > 0.0))
+            else None
+        )
         setpoint, offset, mode_desc = compute_inverter_setpoint(
             room_temp=self._temp,
             target_temp=self._target,
@@ -965,6 +970,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             cycle_elapsed_s=cycle_elapsed_s,
             outdoor_temp=self._outdoor_temp,
             compressor_power_w=comp_power_w,
+            last_setpoint=active_last_sp,
             min_temp=min_temp,
             max_temp=max_temp,
         )
@@ -1049,6 +1055,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             self._demand = False
             self._split_confirmed_heat = False
             self._cycle_started_at = None
+            self._last_setpoint_sent = None
             self._user_target_changed = False
             self._last_command = now
             self._tracker.set_active(self._entry.entry_id, False)
