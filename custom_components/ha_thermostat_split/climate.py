@@ -693,12 +693,24 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         return None
 
     def _compressor_elapsed_s(self, now: datetime) -> float | None:
-        """Durée réelle de fonctionnement du compresseur basée sur la puissance PAC."""
-        if self._tracker is not None:
-            return self._tracker.age_s(now) if self._tracker.is_on else 0.0
-        if self._cycle_started_at is not None:
-            return max(0.0, (now - self._cycle_started_at).total_seconds())
-        return None
+        """Durée écoulée depuis le début du cycle de chauffe (sans remise à zéro sur pause/dégivrage)."""
+        demand_s = (
+            max(0.0, (now - self._cycle_started_at).total_seconds())
+            if self._cycle_started_at is not None
+            else None
+        )
+        comp_s = (
+            self._tracker.age_s(now)
+            if (self._tracker is not None and self._tracker.is_on)
+            else None
+        )
+        if demand_s is not None and comp_s is not None:
+            return max(demand_s, comp_s)
+        if demand_s is not None:
+            return demand_s
+        if comp_s is not None:
+            return comp_s
+        return 0.0 if self._demand else None
 
     # ------------------------------------------------------------------ boucle de régulation
     async def _async_control(self) -> None:
@@ -1107,34 +1119,49 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             )
 
         # 1. Protection immédiate anti-thermo-off (sur sonde bornée pour ignorer la chaleur piégée au démarrage) :
-        # Si la sonde interne du split monte et rattrape la consigne envoyée (current < split_temp + 0.5),
+        # Si la sonde interne du split monte et rattrape la consigne envoyée,
         # on relève la consigne sans attendre les 5 min de modulation pour éviter la coupure compresseur.
         anti_thermo_off = False
-        if clamped_split_temp is not None and current < clamped_split_temp + 0.5:
+        min_safe_margin = (
+            1.0
+            if (
+                self._temp is not None
+                and (self._target - self._temp) >= 0.4
+                and not (
+                    power_w is not None
+                    and power_w >= 1000.0
+                    and (self._target - self._temp) <= 0.35
+                )
+            )
+            else 0.5
+        )
+        if clamped_split_temp is not None and current < clamped_split_temp + min_safe_margin:
             safe_floor = round(
-                min(clamped_split_temp + max(0.5, self._inverter_params.min_offset), 28.0) / step
+                min(
+                    clamped_split_temp + max(min_safe_margin, self._inverter_params.min_offset),
+                    28.0,
+                )
+                / step
             ) * step
-            if safe_floor < clamped_split_temp + 0.5 and clamped_split_temp + 0.5 <= max_temp:
-                safe_floor = round((clamped_split_temp + 0.5) / step) * step
+            if (
+                safe_floor < clamped_split_temp + min_safe_margin
+                and clamped_split_temp + min_safe_margin <= max_temp
+            ):
+                safe_floor = round((clamped_split_temp + min_safe_margin) / step) * step
             wanted = min(max_temp, max(wanted, round(safe_floor, 1)))
             if wanted > current:
                 anti_thermo_off = True
 
         # 2. Relance anti-idle basée uniquement sur la puissance PAC :
-        # Si après 3 min de demande le compresseur ne consomme toujours pas (< seuil W)
-        # et que l'écart à la sonde interne est < 1.0 °C, on pousse la consigne.
+        # Si après 3 min de demande le compresseur ne consomme toujours pas (< seuil W),
+        # on maintient ou pousse la consigne à au moins sonde_split + 1.0 °C sans jamais la rebaisser.
         anti_idle_rescue = False
-        if (
-            not comp_on
-            and demand_elapsed_s >= 180.0
-            and raw_split_temp is not None
-            and current < raw_split_temp + 1.0
-        ):
+        if not comp_on and demand_elapsed_s >= 180.0 and raw_split_temp is not None:
             rescue_sp = round(
                 min(raw_split_temp + max(1.0, self._inverter_params.min_offset), 28.0) / step
             ) * step
-            wanted = min(max_temp, max(wanted, round(rescue_sp, 1)))
-            if wanted > current:
+            wanted = min(max_temp, max(wanted, current, round(rescue_sp, 1)))
+            if current < raw_split_temp + 1.0 and wanted > current:
                 anti_idle_rescue = True
 
         # 3. Verrouillage anti-baisse uniquement en croisière basse puissance (< 650 W) hors démarrage :
@@ -1151,9 +1178,19 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         ):
             wanted = max(wanted, current)
 
-        # 4. Baisse rapide anti-pic quand le capot chaud vient d'être purgé par le ventilateur
-        # ou quand la PAC pousse fort à l'approche de la consigne (écart >= 1.0 °C vers le bas).
-        fast_step_down = (current - wanted) >= 1.0
+        # 4. Baisse rapide anti-pic uniquement compresseur actif quand le capot chaud vient d'être purgé
+        # au démarrage ou quand on approche de la consigne (écart >= 1.0 °C vers le bas).
+        fast_step_down = (
+            comp_on
+            and (current - wanted) >= 1.0
+            and (
+                (
+                    cycle_elapsed_s is not None
+                    and cycle_elapsed_s < self._inverter_params.startup_grace_s
+                )
+                or (self._temp is not None and (self._target - self._temp) <= 0.35)
+            )
+        )
         brake_near_target = (
             wanted < current
             and self._temp is not None
@@ -1183,12 +1220,13 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         if not urgent:
             if self._last_command is not None and now - self._last_command < self._anti_spam:
                 return
-            # En démarrage doux progressif ou en freinage à l'approche de la cible,
+            # En montée progressive de démarrage (wanted > current) ou en freinage à l'approche de la cible,
             # on applique dès l'anti-spam (90 s) sans attendre les 5 min de modulation lente
             if (
                 (
                     cycle_elapsed_s is not None
                     and cycle_elapsed_s < self._inverter_params.startup_grace_s
+                    and wanted > current
                 )
                 or brake_near_target
             ):

@@ -197,7 +197,7 @@ class InverterModulation(unittest.TestCase):
         self.assertIn("anti-pic phase 1", desc)
 
     def test_startup_phase_2_progressive_ramp(self):
-        # À t=200s (phase 2), l'échangeur est tiédi, on autorise une montée progressive
+        # À t=200s (phase 2), l'échangeur est tiédi, on autorise une montée progressive (+1.5°C)
         sp, offset, desc = compute_inverter_setpoint(
             room_temp=18.3,
             target_temp=19.0,
@@ -207,7 +207,7 @@ class InverterModulation(unittest.TestCase):
             learned_bias=1.8,
             cycle_elapsed_s=200.0,
         )
-        self.assertEqual(sp, 20.0)
+        self.assertEqual(sp, 20.5)
         self.assertIn("anti-pic phase 2", desc)
 
     def test_low_power_wakeup_boost(self):
@@ -294,6 +294,58 @@ class InverterModulation(unittest.TestCase):
         )
         self.assertGreaterEqual(sp, 21.0)
         self.assertIn("anti-pic", desc)
+
+        # Cas réel 15/11 à 13:31 avec pas de 0.5°C mais sonde interne entière à 20°C (pièce 19.0°C / cible 19.5°C) :
+        # À t=0s (phase 1), la consigne ne doit pas être 20.5°C (+0.5°C seulement sur sonde entière 20°C)
+        # mais au moins 21.0°C, puis 21.5°C en phase 2 (t=200s) même si la sonde oscille à 19°C.
+        params_half = InverterParams(
+            enabled=True,
+            min_offset=0.5,
+            max_offset=3.0,
+            p_band=1.5,
+            step=0.5,
+            startup_grace_s=360.0,
+            soft_start_error=1.2,
+            max_plausible_bias=3.0,
+        )
+        sp_p1, _, _ = compute_inverter_setpoint(
+            room_temp=19.0,
+            target_temp=19.5,
+            split_temp=20.0,
+            filtered_split_temp=20.5,
+            fallback_setpoint=22.0,
+            params=params_half,
+            cycle_elapsed_s=0.0,
+        )
+        self.assertGreaterEqual(sp_p1, 21.0)
+
+        sp_p2, _, _ = compute_inverter_setpoint(
+            room_temp=18.9,
+            target_temp=19.5,
+            split_temp=19.0,
+            filtered_split_temp=20.4,
+            fallback_setpoint=22.0,
+            params=params_half,
+            cycle_elapsed_s=200.0,
+        )
+        self.assertGreaterEqual(sp_p2, 21.5)
+
+    def test_maintenance_integer_flicker_does_not_drop_setpoint(self):
+        # Cas réel 12/11 à 08:25 : en maintien proche de la cible (19.4°C / 19.5°C),
+        # si la sonde entière du split clignote brièvement de 21°C à 20°C (filtered_split_temp = 20.99°C),
+        # la consigne ne doit pas chuter de 21.5°C à 21.0°C (sinon 3s plus tard cur repasse à 21°C et coupe en idle).
+        sp, _, _ = compute_inverter_setpoint(
+            room_temp=19.4,
+            target_temp=19.5,
+            split_temp=20.0,
+            filtered_split_temp=20.99,
+            fallback_setpoint=22.0,
+            params=self.params,
+            anticipation_offset=0.2,
+            cycle_elapsed_s=1800.0,
+            compressor_power_w=550.0,
+        )
+        self.assertEqual(sp, 21.5)
 
     def test_strict_anti_thermo_off_floor(self):
         # Même si filtered_split_temp retarde (20.2°C) alors que split_temp vient de monter à 21.0°C,

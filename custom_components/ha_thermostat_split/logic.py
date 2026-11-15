@@ -158,14 +158,9 @@ def compute_inverter_setpoint(
             room_temp + effective_max_bias,
             max(room_temp - 0.5, filtered_split_temp),
         )
-        # Ignore les micro-baisses (pas de 1 °C) sans jamais garder une mémoire haute > +0.4/+1.0 °C
+        # Ignore les micro-baisses (pas de 1 °C) sans jamais garder une mémoire haute > +1.0 °C
         # En freinage haute puissance à l'approche de la cible, aucun maintien haut n'est appliqué
-        if high_power_approaching:
-            max_filter_hold = 0.0
-        elif effective_error <= 0.1:
-            max_filter_hold = 0.4
-        else:
-            max_filter_hold = 1.0
+        max_filter_hold = 0.0 if high_power_approaching else 1.0
         ref_split_temp = min(max(filt_clamped, raw_clamped), raw_clamped + max_filter_hold)
     else:
         ref_split_temp = raw_clamped
@@ -226,32 +221,31 @@ def compute_inverter_setpoint(
     step = params.step if params.step > 0 else 0.5
     if in_startup:
         # En phase de démarrage, l'objectif est d'empêcher un saut thermique brutal
-        # tout en assurant une consigne toujours supérieure à la sonde du split (+0.5 °C)
-        # pour éviter que le split ne coupe prématurément en thermo-off (cycles courts).
-        # - Palier 1 (0 à 180s) : consigne bridée à sonde_split + 0.5 °C
-        # - Palier 2 (180 à grace_s) : consigne bridée à sonde_split + 1.2 °C
-        # Si la pièce a un écart significatif (error >= 0.4 °C), la consigne ne doit pas être
-        # inférieure à (target_temp + min_offset) pour éviter que la bouffée de chaleur initiale
-        # ne fasse monter la sonde sous plafond au-dessus de la consigne (thermo-off à 6 min par temps doux).
-        split_ref = raw_clamped
+        # (ex: air chaud piégé sous le capot à 26 °C) tout en garantissant au moins
+        # +1.0 °C (phase 1) puis +1.5 °C (phase 2) au-dessus de la sonde stabilisée
+        # pour éviter qu'une sonde au pas entier (1 °C) ne coupe en thermo-off à 6 min.
+        split_ref = ref_split_temp
         if cycle_elapsed_s < 180.0:
-            soft_sp = round((split_ref + 0.5) / step) * step
+            soft_sp = round((split_ref + 1.0) / step) * step
             mode = "démarrage très doux (anti-pic phase 1)"
         else:
-            soft_sp = round((split_ref + 1.2) / step) * step
+            soft_sp = round((split_ref + 1.5) / step) * step
             mode = "montée progressive (anti-pic phase 2)"
-        if error >= 0.4:
-            target_floor = round((target_temp + (1.2 if step >= 1.0 else 0.8)) / step) * step
-            soft_sp = max(soft_sp, target_floor)
         raw_setpoint = min(raw_setpoint, soft_sp)
 
     rounded = round(raw_setpoint / step) * step
 
-    # Plancher anti-thermo-off strict : la consigne arrondie doit rester au moins à +0.5 °C
-    # au-dessus de la sonde du split bornée (sinon consigne == sonde_split => coupure compresseur)
+    # Plancher anti-thermo-off strict : la consigne arrondie doit rester suffisamment
+    # au-dessus de la sonde du split bornée (capteur souvent au pas entier de 1 °C)
     min_floor_offset = max(0.5, params.min_offset)
-    if not in_startup and not high_power_approaching:
-        if low_power_sluggish:
+    if not high_power_approaching:
+        if in_startup:
+            if error >= 0.4:
+                if cycle_elapsed_s is not None and cycle_elapsed_s < 180.0:
+                    min_floor_offset = max(min_floor_offset, 1.0)
+                else:
+                    min_floor_offset = max(min_floor_offset, 1.5 if error >= 0.5 else 1.0)
+        elif low_power_sluggish:
             min_floor_offset = max(min_floor_offset, 2.5 if step >= 1.0 else 2.0)
             if error >= 0.8:
                 min_floor_offset = max(min_floor_offset, 3.2 if step >= 1.0 else 2.5)
@@ -264,10 +258,14 @@ def compute_inverter_setpoint(
         floor_sp += step
 
     # En demande de chauffe (error >= 0.4 °C), la consigne envoyée ne doit jamais être
-    # bridée trop bas sous plafond, sinon la bouffée de chaleur du démarrage coupe le compresseur
+    # bridée trop bas sous plafond, sinon la bouffée de chaleur à t=5 min coupe le compresseur
     # en thermo-off au bout de 6 minutes par temps doux (>= 10 °C ext).
     if error >= 0.4 and not high_power_approaching:
-        target_floor = round((target_temp + (1.2 if step >= 1.0 else 0.8)) / step) * step
+        if in_startup and cycle_elapsed_s is not None and cycle_elapsed_s < 180.0:
+            min_target_margin = 1.5 if error >= 0.8 else (1.2 if step >= 1.0 else 1.0)
+        else:
+            min_target_margin = 1.8 if error >= 0.8 else 1.5
+        target_floor = round((target_temp + min_target_margin) / step) * step
         floor_sp = max(floor_sp, target_floor)
 
     rounded = max(rounded, floor_sp)
