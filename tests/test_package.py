@@ -45,6 +45,44 @@ class PackageIntegrityTests(unittest.TestCase):
         self.assertEqual(strings, fr)
         self.assertEqual(strings, en)
 
+    def test_climate_tracker_and_learner_attributes_exist(self):
+        """Vérifie qu'aucun attribut inexistant n'est appelé sur self._tracker / self._learner."""
+        comp_src = (CC_DIR / "compressor.py").read_text(encoding="utf-8")
+        comp_tree = ast.parse(comp_src)
+        tracker_attrs = set()
+        for node in ast.walk(comp_tree):
+            if isinstance(node, ast.ClassDef) and node.name == "CompressorTracker":
+                for item in ast.walk(node):
+                    if isinstance(item, ast.FunctionDef):
+                        tracker_attrs.add(item.name)
+                    elif (
+                        isinstance(item, ast.Attribute)
+                        and isinstance(item.value, ast.Name)
+                        and item.value.id == "self"
+                    ):
+                        tracker_attrs.add(item.attr)
+
+        clim_src = (CC_DIR / "climate.py").read_text(encoding="utf-8")
+        clim_tree = ast.parse(clim_src)
+        for node in ast.walk(clim_tree):
+            if isinstance(node, ast.Attribute):
+                # self._tracker.<attr> ou tracker.<attr> ou tr.<attr>
+                if (
+                    isinstance(node.value, ast.Attribute)
+                    and isinstance(node.value.value, ast.Name)
+                    and node.value.value.id == "self"
+                    and node.value.attr == "_tracker"
+                ) or (
+                    isinstance(node.value, ast.Name)
+                    and node.value.id in ("tracker", "tr")
+                ):
+                    self.assertIn(
+                        node.attr,
+                        tracker_attrs,
+                        f"climate.py accède à un attribut inexistant sur CompressorTracker : {node.attr}",
+                    )
+
+
 
 if __name__ == "__main__":
     unittest.main()

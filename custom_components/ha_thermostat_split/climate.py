@@ -704,7 +704,9 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             if (self._tracker is not None and self._tracker.is_on)
             else None
         )
-        has_power_sensor = bool(self._tracker is not None and self._tracker._power_entity)
+        has_power_sensor = bool(
+            self._power or (self._tracker is not None and getattr(self._tracker, "power_entity", None))
+        )
         if has_power_sensor and (demand_s is None or demand_s < 900.0):
             if comp_s is not None:
                 return comp_s

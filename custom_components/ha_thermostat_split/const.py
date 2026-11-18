@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "ha_thermostat_split"
-VERSION = "0.5.10"
+VERSION = "0.5.11"
 
 CONF_NAME = "name"
 CONF_SPLIT = "split_entity"
