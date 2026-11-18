@@ -693,7 +693,7 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         return None
 
     def _compressor_elapsed_s(self, now: datetime) -> float | None:
-        """Durée écoulée depuis le début du cycle de chauffe (sans remise à zéro sur pause/dégivrage)."""
+        """Durée écoulée depuis le début du cycle de chauffe (avec re-démarrage doux si coupure précoce < 15 min)."""
         demand_s = (
             max(0.0, (now - self._cycle_started_at).total_seconds())
             if self._cycle_started_at is not None
@@ -704,6 +704,11 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             if (self._tracker is not None and self._tracker.is_on)
             else None
         )
+        has_power_sensor = bool(self._tracker is not None and self._tracker._power_entity)
+        if has_power_sensor and (demand_s is None or demand_s < 900.0):
+            if comp_s is not None:
+                return comp_s
+            return 0.0 if self._demand else None
         if demand_s is not None and comp_s is not None:
             return max(demand_s, comp_s)
         if demand_s is not None:
@@ -934,8 +939,9 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
         if self._temp is None:
             return min(max_temp, max(min_temp, self._split_setpoint))
 
+        now_utc = dt_util.utcnow()
         if cycle_elapsed_s is None:
-            cycle_elapsed_s = self._compressor_elapsed_s(dt_util.utcnow())
+            cycle_elapsed_s = self._compressor_elapsed_s(now_utc)
 
         inverter_params = InverterParams(
             enabled=self._inverter_params.enabled,
@@ -948,11 +954,27 @@ class HAThermostatSplit(ClimateEntity, RestoreEntity):
             max_plausible_bias=self._inverter_params.max_plausible_bias,
         )
 
-        comp_power_w = (
+        comp_age_s = (
+            self._tracker.age_s(now_utc)
+            if (self._tracker is not None and self._tracker.is_on)
+            else None
+        )
+        raw_power_w = (
             self._tracker.power_w
             if (self._tracker is not None and self._tracker.is_on)
             else None
         )
+        # Ignorer la faible puissance transitoire de lancement (< 180 s après démarrage compresseur)
+        # pour ne jamais déclencher de fausse "relance puissance" à t=1 s lors d'une reprise post-pause.
+        if (
+            raw_power_w is not None
+            and raw_power_w < 1000.0
+            and comp_age_s is not None
+            and comp_age_s < 180.0
+        ):
+            comp_power_w = None
+        else:
+            comp_power_w = raw_power_w
         active_last_sp = (
             self._last_setpoint_sent
             if (self._demand and (cycle_elapsed_s is None or cycle_elapsed_s > 0.0))
